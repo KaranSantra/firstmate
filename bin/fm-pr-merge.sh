@@ -77,7 +77,7 @@
 # repository's remote resolved.
 #
 # The AWS profile is read from the task worktree's own git remote by
-# bin/fm-pr-check.sh, which this script runs before either forge call.
+# bin/fm-pr-check.sh, which this script runs before any forge call.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
@@ -883,7 +883,7 @@ codecommit_confirm_merged() {
   [ "$merged" = true ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Record before any forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 record_pr_metadata || exit 1

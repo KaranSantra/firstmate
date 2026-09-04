@@ -178,7 +178,7 @@ $ aws codecommit get-pull-request --pull-request-id 27 --region us-east-1 \
 ## What the live evidence does not cover
 
 A merge that actually lands was not run against a real repository, because the only CodeCommit pull request available was real unmerged work that had not been authorized for merging.
-The merge command's construction is proven above; the outcome read that follows it, and the refusal when that read cannot prove a merge, are proven by test double in `tests/fm-pr-merge.test.sh`.
+The merge command's construction is proven above for the default squash method only; the other two methods, the outcome read that follows the merge, and the refusal when that read cannot prove a merge, are proven by test double in `tests/fm-pr-merge.test.sh`.
 
 ## Refreshing this record
 
@@ -187,4 +187,5 @@ bin/fm-test-run.sh tests/fm-pr-merge.test.sh tests/fm-pr-check-security.test.sh
 ```
 
 Those two suites carry the CodeCommit URL matrix, the arming and static-poll contract, the arming refusals for a profile that cannot read the pull request and for a pull request belonging to another repository, an option-shaped pull request title reaching the merge intact, the pre-merge conditions, and the refusal on an unproven merge.
+They also carry, by test double, the poll's merge detection on both of its entry points - printing `merged` only for `isMerged` on this repository's own target, and staying silent on an open pull request, a closed but unmerged one, a failed AWS call, a foreign target, and a doctored sidecar - and each accepted merge method's own API paired with the `--merge-option` its conflict read is judged under, with the commit message present or absent as that API takes it.
 The live reads above need an authenticated AWS profile and a CodeCommit repository, so they are refreshed by hand when the AWS CLI or the CodeCommit API changes.

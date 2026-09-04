@@ -144,9 +144,13 @@ case "$provider" in
     [ "$host" = "$region.console.aws.amazon.com" ] || exit 0
     [ "${#region}" -ge 5 ] && [ "${#region}" -le 32 ] || exit 0
     # An AWS region is lowercase, hyphen-separated, starts with a letter and
-    # ends with its numeric suffix. Revalidated here rather than trusted, so a
-    # doctored sidecar cannot reach the AWS CLI with a region-shaped argument
-    # the arming validator would have refused.
+    # ends with its numeric suffix. This poll is byte-static and sources
+    # nothing, so it checks that shape itself rather than trusting the sidecar,
+    # and a doctored one therefore cannot reach the AWS CLI with an
+    # option-shaped or otherwise unsafe region argument. It is a shape check
+    # and not a copy of fm_pr_codecommit_region_valid in bin/fm-pr-lib.sh,
+    # which is the canonical rule and refuses region strings this shape check
+    # accepts.
     case "$region" in
       *[!a-z0-9-]*|-*|*-|[!a-z]*|*[!0-9]|*--*) exit 0 ;;
     esac
