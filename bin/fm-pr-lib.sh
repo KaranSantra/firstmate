@@ -461,7 +461,12 @@ fm_pr_metadata_identity_parse() {
 
 # The one rule tying a sidecar credential line to its provider: codecommit must
 # carry a usable AWS profile, and every other provider must carry none at all.
-# Stating it once keeps the reader, the writer, and the poll from drifting.
+# Stating it once keeps the sidecar reader and the sidecar writer from drifting.
+# bin/fm-pr-poll.sh cannot call this helper: it is byte-static and sources
+# nothing, so it necessarily carries its own inline copy of this same rule.
+# Changing this function is therefore not sufficient - the copy in
+# bin/fm-pr-poll.sh must change in step, and a poll that keeps the old rule is
+# only recoverable by re-arming it.
 fm_pr_credential_valid_for_provider() {  # <provider> <credential>
   local provider=${1-} credential=${2-}
   if [ "$provider" = codecommit ]; then

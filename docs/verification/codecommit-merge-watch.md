@@ -65,6 +65,8 @@ origin	codecommit::us-east-1://AWSAdministratorAccess-776781950322@Modus-Adyen-C
 
 The default credential chain is unauthenticated on this machine, so falling back to it would arm a watch that can only fail.
 `bin/fm-pr-check.sh` and `bin/fm-pr-merge.sh` therefore refuse when no profile can be derived, and both require the remote to name the same repository, and the same region when it pins one, as the URL.
+A derivable profile is not proof of a working one, so arming reads the pull request with it before publishing anything: a profile that cannot read the pull request refuses non-zero with the `aws sso login` remedy and leaves no check, sidecar, or registration behind, rather than dropping `pr_head` and reporting a watch that can never fire.
+A read that succeeds but returns a pull request targeting another repository refuses separately, naming the repository it actually targets, because that session is authenticated and re-authenticating it would send the operator in circles.
 
 ## The poll, against both live pull requests
 
@@ -180,5 +182,5 @@ The merge command's construction is proven above; the outcome read that follows 
 bin/fm-test-run.sh tests/fm-pr-merge.test.sh tests/fm-pr-check-security.test.sh
 ```
 
-Those two suites carry the CodeCommit URL matrix, the arming and static-poll contract, the pre-merge conditions, and the refusal on an unproven merge.
+Those two suites carry the CodeCommit URL matrix, the arming and static-poll contract, the arming refusals for a profile that cannot read the pull request and for a pull request belonging to another repository, an option-shaped pull request title reaching the merge intact, the pre-merge conditions, and the refusal on an unproven merge.
 The live reads above need an authenticated AWS profile and a CodeCommit repository, so they are refreshed by hand when the AWS CLI or the CodeCommit API changes.

@@ -18,15 +18,14 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-JQ_BIN=$(command -v jq) || fail "these tests read the AWS CLI's JSON with the real jq, which was not found"
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
-# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
-# deliberately restricted, so a case that needs jq exposes this one rather than
-# depending on the host keeping jq in one of those four directories.
-REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
+# The merge path reads glab's and the AWS CLI's JSON with the real jq, and
+# BASE_PATH is deliberately restricted, so a case that needs jq exposes this one
+# rather than depending on the host keeping jq in one of those four directories.
+REAL_JQ=$(command -v jq) || fail "these tests read glab's and the AWS CLI's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -2196,7 +2195,7 @@ esac
 exit 0
 SH
   chmod +x "$dir/fakebin/aws"
-  ln -sf "$JQ_BIN" "$dir/fakebin/jq"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   : > "$dir/aws.log"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" remote add origin "codecommit::$CC_REGION://$CC_PROFILE@$CC_REPO"
@@ -2245,10 +2244,11 @@ test_codecommit_arming_is_static_and_private() {
   pass "arming a CodeCommit watch keeps the poll static and confines the profile to the sidecar"
 }
 
-# Replace the fixture's aws with one that cannot answer, the two ways an armed
-# CodeCommit watch would otherwise go permanently silent: an expired SSO session
-# (non-zero, diagnosis on stderr only) and a payload that names no target for
-# this repository, so no single head can be read.
+# Replace the fixture's aws with one that cannot answer for this repository, the
+# two ways an armed CodeCommit watch would otherwise go permanently silent: an
+# expired SSO session (non-zero, diagnosis on stderr only) and a successful read
+# whose only target is another repository. Each leaves the operator somewhere
+# different, so each has to be reported apart.
 break_codecommit_aws() {
   local dir=$1 mode=$2
   case "$mode" in
@@ -2293,12 +2293,30 @@ test_codecommit_arming_refuses_an_unreadable_pull_request() {
     [ "$rc" -ne 0 ] || fail "codecommit-arm-$variant: arming should refuse when the pull request cannot be read"
     assert_no_grep 'armed:' "$dir/stdout" \
       "codecommit-arm-$variant: a refused arming still reported itself armed"
-    assert_grep "$CC_PROFILE" "$dir/stderr" \
-      "codecommit-arm-$variant: the refusal should name the AWS profile that could not read the pull request"
-    assert_grep 're-authenticate' "$dir/stderr" \
-      "codecommit-arm-$variant: the refusal should say to re-authenticate that session"
-    assert_grep 'bin/fm-pr-check.sh' "$dir/stderr" \
-      "codecommit-arm-$variant: the refusal should say to re-run the check"
+    case "$variant" in
+      unauthenticated)
+        # The session is the problem, so the refusal names the profile and the
+        # one command that repairs it.
+        assert_grep "$CC_PROFILE" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the AWS profile that could not read the pull request"
+        assert_grep "aws sso login --profile $CC_PROFILE" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the command that re-authenticates that session"
+        assert_grep 'bin/fm-pr-check.sh' "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should say to re-run the check"
+        ;;
+      foreign-target)
+        # The session is fine and the pull request was read, so telling the
+        # operator to re-authenticate would send them in circles.
+        assert_grep "does not target repository $CC_REPO" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should say the pull request targets another repository"
+        assert_grep 'it targets Other-Repo' "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the repository actually targeted"
+        assert_no_grep 're-authenticate' "$dir/stderr" \
+          "codecommit-arm-$variant: a valid session must not be blamed on authentication"
+        assert_no_grep 'aws sso login' "$dir/stderr" \
+          "codecommit-arm-$variant: a valid session must not be sent through an SSO login"
+        ;;
+    esac
     assert_absent "$dir/home/state/task-a.check.sh" \
       "codecommit-arm-$variant: a refused arming left a check behind"
     assert_absent "$dir/home/state/task-a.pr-poll" \
@@ -2308,7 +2326,7 @@ test_codecommit_arming_refuses_an_unreadable_pull_request() {
     assert_no_grep "pr=$CC_URL" "$dir/home/state/task-a.meta" \
       "codecommit-arm-$variant: a refused arming still recorded the canonical URL"
   done
-  pass "arming a CodeCommit watch refuses when the AWS profile cannot read the pull request"
+  pass "arming a CodeCommit watch refuses an unreadable and a foreign pull request, each named apart"
 }
 
 test_codecommit_arming_refuses_without_a_profile() {

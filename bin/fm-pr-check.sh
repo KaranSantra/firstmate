@@ -138,19 +138,37 @@ fi
 # refuses to arm rather than arming headless, because a refusal is loud,
 # immediate, and recovered by re-running this script, while a dead watch stays
 # quiet until a human notices work never merged.
+# A read that fails and a read that succeeds for another repository leave the
+# operator somewhere different, so they are reported apart the way the missing
+# tool, the unreadable remote, and the underivable profile above already are.
 if [ "$PROVIDER" = codecommit ]; then
   CC_PR_JSON=
+  CC_PR_TARGETS=
   REMOTE_HEAD=
   if ! CC_PR_JSON=$(aws codecommit get-pull-request --pull-request-id "$NUMBER" \
       --region "$REGION" --profile "$CREDENTIAL" --output json 2>/dev/null) \
     || [ -z "$CC_PR_JSON" ] \
-    || ! REMOTE_HEAD=$(printf '%s' "$CC_PR_JSON" | jq -r --arg repo "$PROJECT_PATH" \
-          '[.pullRequest.pullRequestTargets[]
-             | select(.repositoryName == $repo)
-             | .sourceCommit]
-           | if length == 1 then .[0] else error("no single target") end' 2>/dev/null) \
-    || ! fm_pr_head_valid "$REMOTE_HEAD"; then
-    echo "error: could not read CodeCommit pull request $NUMBER in repository $PROJECT_PATH with AWS profile $CREDENTIAL; re-authenticate that profile's SSO session (aws sso login --profile $CREDENTIAL) and re-run bin/fm-pr-check.sh" >&2
+    || ! CC_PR_TARGETS=$(printf '%s' "$CC_PR_JSON" | jq -r \
+          'if type == "object" then
+             [(.pullRequest // error("no pull request")).pullRequestTargets[]?
+              | .repositoryName // empty]
+             | join(", ")
+           else
+             error("pull request payload is not an object")
+           end' 2>/dev/null); then
+    echo "error: could not read CodeCommit pull request $NUMBER in $REGION with AWS profile $CREDENTIAL; re-authenticate that profile's SSO session (aws sso login --profile $CREDENTIAL) and re-run bin/fm-pr-check.sh" >&2
+    exit 1
+  fi
+  if ! REMOTE_HEAD=$(printf '%s' "$CC_PR_JSON" | jq -r --arg repo "$PROJECT_PATH" \
+        '[.pullRequest.pullRequestTargets[]
+           | select(.repositoryName == $repo)
+           | .sourceCommit]
+         | if length == 1 then .[0] else error("no single target") end' 2>/dev/null); then
+    echo "error: CodeCommit pull request $NUMBER was read but does not target repository $PROJECT_PATH; it targets ${CC_PR_TARGETS:-no repository}, so the URL names the wrong repository" >&2
+    exit 1
+  fi
+  if ! fm_pr_head_valid "$REMOTE_HEAD"; then
+    echo "error: CodeCommit pull request $NUMBER names no valid head commit for repository $PROJECT_PATH" >&2
     exit 1
   fi
   PR_HEAD=$REMOTE_HEAD

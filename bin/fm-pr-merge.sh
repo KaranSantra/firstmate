@@ -950,10 +950,13 @@ case "$PROVIDER" in
     # push that lands in between is refused by CodeCommit instead of merged
     # unverified. The squash and three-way APIs build a new commit, so they
     # carry the pull request's own title as its message; the fast-forward API
-    # creates no commit and takes none.
+    # creates no commit and takes none. The title is forge data and may begin
+    # with "-", which the AWS CLI reads as another option when the value is a
+    # separate argument, so it is carried in the single-token form that is
+    # always an explicit value.
     codecommit_merge_args=()
     if [ "$CODECOMMIT_MERGE_API" != merge-pull-request-by-fast-forward ]; then
-      codecommit_merge_args=(--commit-message "$FM_PR_CC_TITLE")
+      codecommit_merge_args=(--commit-message="$FM_PR_CC_TITLE")
     fi
     codecommit_aws "$CODECOMMIT_MERGE_API" \
       --pull-request-id "$PR_NUMBER" \

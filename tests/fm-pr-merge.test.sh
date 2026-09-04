@@ -2108,6 +2108,13 @@ CC_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 # failure. Its answers are files in the case dir, so a test changes one
 # condition at a time. A merge writes the merged marker the outcome read then
 # sees, which is what lets a test hold the merge and the proof apart.
+#
+# It also reproduces the CLI's argument parsing for --commit-message, because
+# that is a contract this path depends on: a separate value beginning with "-"
+# and carrying no space is read as another option, so the option is left without
+# an argument and the command is a usage error, exactly as aws-cli 2.34.9
+# behaves. The message that survives parsing is recorded so a test can assert
+# the exact bytes that reached the CLI.
 add_aws_mock() {
   local case_dir=$1
   cat > "$case_dir/fakebin/aws" <<SH
@@ -2119,13 +2126,40 @@ approved=\$(cat "$case_dir/cc-approved" 2>/dev/null || printf 'true')
 mergeable=\$(cat "$case_dir/cc-mergeable" 2>/dev/null || printf 'true')
 head=\$(cat "$case_dir/cc-head" 2>/dev/null || printf '%s' "$CC_HEAD")
 repo=\$(cat "$case_dir/cc-repo" 2>/dev/null || printf '%s' "$CC_REPO")
+title=\$(cat "$case_dir/cc-title" 2>/dev/null || printf 'fixture pull request')
 merged=false
 [ -e "$case_dir/cc-merged" ] && merged=true
+
+record_commit_message() {
+  local message= value
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --commit-message=*) message=\${1#--commit-message=} ;;
+      --commit-message)
+        shift
+        [ "\$#" -gt 0 ] || { printf 'aws: error: argument --commit-message: expected one argument\n' >&2; return 2; }
+        value=\$1
+        case "\$value" in
+          -?*)
+            case "\$value" in
+              *' '*) ;;
+              *) printf 'aws: error: argument --commit-message: expected one argument\n' >&2; return 2 ;;
+            esac
+            ;;
+        esac
+        message=\$value
+        ;;
+    esac
+    shift
+  done
+  printf '%s' "\$message" > "$case_dir/cc-commit-message"
+}
+
 case "\$sub" in
   get-pull-request)
     [ "\${FM_TEST_CC_READ_FAIL:-0}" = 0 ] || exit 1
-    printf '{"pullRequest":{"pullRequestId":"27","title":"fixture pull request","pullRequestStatus":"%s","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":%s}}]}}\n' \\
-      "\$status" "\$repo" "\$head" "\$merged"
+    printf '{"pullRequest":{"pullRequestId":"27","title":"%s","pullRequestStatus":"%s","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":%s}}]}}\n' \\
+      "\$title" "\$status" "\$repo" "\$head" "\$merged"
     ;;
   evaluate-pull-request-approval-rules)
     [ "\${FM_TEST_CC_APPROVAL_FAIL:-0}" = 0 ] || exit 1
@@ -2136,6 +2170,7 @@ case "\$sub" in
     printf '{"mergeable":%s,"conflictMetadataList":[]}\n' "\$mergeable"
     ;;
   merge-pull-request-by-squash|merge-pull-request-by-three-way|merge-pull-request-by-fast-forward)
+    record_commit_message "\$@" || exit 2
     [ "\${FM_TEST_CC_MERGE_FAIL:-0}" = 0 ] || exit 1
     [ "\${FM_TEST_CC_MERGE_SILENT:-0}" = 1 ] || : > "$case_dir/cc-merged"
     printf '{"pullRequest":{"pullRequestId":"27"}}\n'
@@ -2203,6 +2238,31 @@ test_codecommit_url_resolves_and_merges() {
     *) fail "codecommit-merges: the region should come from the URL, got: $merge_line" ;;
   esac
   pass "a CodeCommit console URL resolves and merges through the AWS CLI"
+}
+
+# A pull request title is forge data and may be shaped like an option. It has to
+# reach the merge as the commit message verbatim: the AWS CLI reads a separate
+# "-"-leading value as another option, which aborts the merge in argument
+# parsing after the poll is already armed, with only the CLI's usage error to go
+# on. Nothing about the title may be sanitised to dodge that.
+test_codecommit_option_shaped_title_still_merges() {
+  local case_dir rc recorded
+  case_dir=$(make_codecommit_case codecommit-dash-title)
+  printf '%s' '--wip' > "$case_dir/cc-title"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codecommit-dash-title: an option-shaped title must not block the merge"
+  assert_grep "verified: $CC_URL is merged" "$case_dir/stdout" \
+    "codecommit-dash-title: the merge should still be proven"
+  recorded=$(cat "$case_dir/cc-commit-message" 2>/dev/null || printf '<none>')
+  [ "$recorded" = '--wip' ] \
+    || fail "codecommit-dash-title: the title did not reach the merge verbatim, got: $recorded"
+  pass "a CodeCommit pull request title shaped like an option reaches the merge verbatim"
 }
 
 test_codecommit_unproved_merge_refuses() {
@@ -2481,6 +2541,7 @@ test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
 test_codecommit_url_resolves_and_merges
+test_codecommit_option_shaped_title_still_merges
 test_codecommit_unproved_merge_refuses
 test_codecommit_closed_but_unmerged_is_not_a_merge
 test_codecommit_each_condition_refuses_independently
