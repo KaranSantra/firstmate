@@ -87,9 +87,10 @@ fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field and CodeCommit names it on the pull
-# request's own target; plain glab exposes it only inside its JSON output, which
+# For GitHub, pr_head is recorded only when the forge's CLI can supply it. gh
+# exposes the head commit as a selectable field, and CodeCommit names it on the
+# pull request's own target and requires it (below); plain glab exposes it only
+# inside its JSON output, which
 # would need a JSON processor firstmate does not require, so a GitLab task
 # records no pr_head. Both consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
@@ -126,18 +127,33 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 # CodeCommit names the head commit of every pull request target, so the exact
-# head is recorded here the way GitHub's is.
+# head is recorded here the way GitHub's is. Unlike GitHub's, this read is a
+# prerequisite rather than a best effort: it is the only proof that the profile
+# the remote names is actually authenticated, and a shape-valid profile whose
+# SSO session has expired is indistinguishable from a working one until the
+# poll runs. A watch that reports itself armed but can never fire silently
+# disables merging green work autonomously and nothing ever surfaces it, which
+# is exactly the failure this file's header says the profile requirement exists
+# to prevent. The trade is accepted deliberately: a transient AWS outage now
+# refuses to arm rather than arming headless, because a refusal is loud,
+# immediate, and recovered by re-running this script, while a dead watch stays
+# quiet until a human notices work never merged.
 if [ "$PROVIDER" = codecommit ]; then
-  if REMOTE_HEAD=$(aws codecommit get-pull-request --pull-request-id "$NUMBER" \
-      --region "$REGION" --profile "$CREDENTIAL" --output json 2>/dev/null \
-      | jq -r --arg repo "$PROJECT_PATH" \
+  CC_PR_JSON=
+  REMOTE_HEAD=
+  if ! CC_PR_JSON=$(aws codecommit get-pull-request --pull-request-id "$NUMBER" \
+      --region "$REGION" --profile "$CREDENTIAL" --output json 2>/dev/null) \
+    || [ -z "$CC_PR_JSON" ] \
+    || ! REMOTE_HEAD=$(printf '%s' "$CC_PR_JSON" | jq -r --arg repo "$PROJECT_PATH" \
           '[.pullRequest.pullRequestTargets[]
              | select(.repositoryName == $repo)
              | .sourceCommit]
            | if length == 1 then .[0] else error("no single target") end' 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
+    || ! fm_pr_head_valid "$REMOTE_HEAD"; then
+    echo "error: could not read CodeCommit pull request $NUMBER in repository $PROJECT_PATH with AWS profile $CREDENTIAL; re-authenticate that profile's SSO session (aws sso login --profile $CREDENTIAL) and re-run bin/fm-pr-check.sh" >&2
+    exit 1
   fi
+  PR_HEAD=$REMOTE_HEAD
 fi
 
 META_TMP=

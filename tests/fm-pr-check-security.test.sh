@@ -2245,6 +2245,72 @@ test_codecommit_arming_is_static_and_private() {
   pass "arming a CodeCommit watch keeps the poll static and confines the profile to the sidecar"
 }
 
+# Replace the fixture's aws with one that cannot answer, the two ways an armed
+# CodeCommit watch would otherwise go permanently silent: an expired SSO session
+# (non-zero, diagnosis on stderr only) and a payload that names no target for
+# this repository, so no single head can be read.
+break_codecommit_aws() {
+  local dir=$1 mode=$2
+  case "$mode" in
+    unauthenticated)
+      cat > "$dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/aws.log"
+echo 'Error loading SSO Token: Token for pa-team.awsapps.com does not exist' >&2
+exit 255
+SH
+      ;;
+    foreign-target)
+      cat > "$dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/aws.log"
+printf '{"pullRequest":{"pullRequestId":"27","pullRequestStatus":"OPEN","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"Other-Repo","sourceCommit":"%s","destinationReference":"refs/heads/main"}]}}\n' \\
+  "$CC_HEAD"
+exit 0
+SH
+      ;;
+  esac
+  chmod +x "$dir/fakebin/aws"
+}
+
+# An AWS profile is only shape-checked against the remote, so an expired SSO
+# session still passes every check before this read. Arming must refuse rather
+# than drop pr_head and report itself armed, because the poll is silent on every
+# error and nothing would ever surface the dead watch.
+test_codecommit_arming_refuses_an_unreadable_pull_request() {
+  local dir rc variant
+  for variant in unauthenticated foreign-target; do
+    dir=$(make_case "codecommit-arm-$variant")
+    write_task_meta "$dir"
+    add_codecommit_fixture "$dir"
+    break_codecommit_aws "$dir" "$variant"
+
+    set +e
+    run_check_entry "$dir" task-a "$CC_URL" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-arm-$variant: arming should refuse when the pull request cannot be read"
+    assert_no_grep 'armed:' "$dir/stdout" \
+      "codecommit-arm-$variant: a refused arming still reported itself armed"
+    assert_grep "$CC_PROFILE" "$dir/stderr" \
+      "codecommit-arm-$variant: the refusal should name the AWS profile that could not read the pull request"
+    assert_grep 're-authenticate' "$dir/stderr" \
+      "codecommit-arm-$variant: the refusal should say to re-authenticate that session"
+    assert_grep 'bin/fm-pr-check.sh' "$dir/stderr" \
+      "codecommit-arm-$variant: the refusal should say to re-run the check"
+    assert_absent "$dir/home/state/task-a.check.sh" \
+      "codecommit-arm-$variant: a refused arming left a check behind"
+    assert_absent "$dir/home/state/task-a.pr-poll" \
+      "codecommit-arm-$variant: a refused arming left a sidecar behind"
+    assert_absent "$dir/home/state/task-a.pr-poll-registration" \
+      "codecommit-arm-$variant: a refused arming left a registration behind"
+    assert_no_grep "pr=$CC_URL" "$dir/home/state/task-a.meta" \
+      "codecommit-arm-$variant: a refused arming still recorded the canonical URL"
+  done
+  pass "arming a CodeCommit watch refuses when the AWS profile cannot read the pull request"
+}
+
 test_codecommit_arming_refuses_without_a_profile() {
   local dir rc
   # A remote naming no profile, and a remote naming another repository, must
@@ -2304,3 +2370,4 @@ test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_codecommit_arming_is_static_and_private
 test_codecommit_arming_refuses_without_a_profile
+test_codecommit_arming_refuses_an_unreadable_pull_request

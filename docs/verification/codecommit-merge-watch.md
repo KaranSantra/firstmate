@@ -125,7 +125,9 @@ IDENTICAL
 
 The sixth line is the profile.
 It is the only field that is not reconstructible from the identity, so it is accepted only for a codecommit record, and the registration's hash of the whole sidecar is what binds it against tampering.
-A GitHub or GitLab sidecar carries no sixth line at all and is byte-identical to one written before CodeCommit existed, so no already-armed watch had to be re-armed by this change.
+A GitHub or GitLab sidecar carries no sixth line at all and is byte-identical to one written before CodeCommit existed, so no already-published sidecar was invalidated.
+That is not the same as needing no re-arming: this change also edits `bin/fm-pr-poll.sh`, and `fm_pr_poll_artifacts_valid` compares every armed check against the shipped poll source byte for byte, so every poll armed before the upgrade - on every provider - fails that comparison once and stays rejected until `bin/fm-pr-check.sh` arms it again.
+That follows from editing the byte-static poll source at all and is not specific to CodeCommit.
 
 ## The merge path, with the merge itself blocked
 

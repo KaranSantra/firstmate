@@ -601,7 +601,11 @@ fm_pr_poll_revoke_final() {
 
 # An empty credential writes no sixth line at all, so a github or gitlab
 # sidecar stays byte-identical to one written before CodeCommit existed and no
-# armed poll has to be re-armed by this change.
+# already-published sidecar is invalidated. That is a narrower claim than
+# needing no re-arming at all: fm_pr_poll_artifacts_valid compares every armed
+# check against the shipped bin/fm-pr-poll.sh byte for byte, so any release
+# that edits the poll source invalidates every poll armed before it, on every
+# provider, until bin/fm-pr-check.sh arms it again.
 fm_pr_poll_write_data() {  # <file> <provider> <url> <host> <path> <number> <credential>
   local file=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 credential=$7
   if [ -z "$credential" ]; then
