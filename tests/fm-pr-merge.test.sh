@@ -2198,46 +2198,92 @@ make_codecommit_case() {
 }
 
 # The merge line aws was asked to run, so a test asserts one exact invocation
-# rather than a substring of the whole log.
+# rather than a substring of the whole log. The conflict read is asserted the
+# same way, because the merge API and the merge option it is judged under are
+# one decision and the failure that matters is the two drifting apart.
 aws_merge_line() {
   grep -F ' merge-pull-request-' "$1" || true
 }
 
+aws_conflict_line() {
+  grep -F ' get-merge-conflicts ' "$1" || true
+}
+
 test_codecommit_url_resolves_and_merges() {
-  local case_dir rc merge_line
-  case_dir=$(make_codecommit_case codecommit-merges)
+  local case_dir rc merge_line conflict_line method label api option recorded
+  # Each merge method the caller may ask for picks two coupled values: the AWS
+  # API that merges, and the --merge-option the conflict state is read under.
+  # Both are asserted for every method, because a mapping that pairs one
+  # method's API with another's conflict read would judge the merge one way,
+  # perform it another, and still report itself verified.
+  for method in '' --merge --fast-forward; do
+    case "$method" in
+      '') api=merge-pull-request-by-squash; option=SQUASH_MERGE; label=default-squash ;;
+      --merge) api=merge-pull-request-by-three-way; option=THREE_WAY_MERGE; label=merge ;;
+      --fast-forward) api=merge-pull-request-by-fast-forward; option=FAST_FORWARD_MERGE; label=fast-forward ;;
+    esac
+    case_dir=$(make_codecommit_case "codecommit-merges-$label")
 
-  set +e
-  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
+    set +e
+    if [ -n "$method" ]; then
+      run_pr_merge "$case_dir" task-x1 "$CC_URL" "$method" \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
+    rc=$?
+    set -e
 
-  expect_code 0 "$rc" "codecommit-merges: a mergeable CodeCommit PR should merge"
-  assert_grep "pr=$CC_URL" "$case_dir/state/task-x1.meta" \
-    "codecommit-merges: the canonical URL should be recorded"
-  assert_grep "pr_head=$CC_HEAD" "$case_dir/state/task-x1.meta" \
-    "codecommit-merges: the exact head should be recorded"
-  assert_grep "verified: $CC_URL is merged" "$case_dir/stdout" \
-    "codecommit-merges: a proven merge should be reported"
-  merge_line=$(aws_merge_line "$case_dir/aws.log")
-  case "$merge_line" in
-    *"merge-pull-request-by-squash"*) ;;
-    *) fail "codecommit-merges: squash should be the default merge method, got: $merge_line" ;;
-  esac
-  case "$merge_line" in
-    *"--source-commit-id $CC_HEAD"*) ;;
-    *) fail "codecommit-merges: the merge should be bound to the verified head, got: $merge_line" ;;
-  esac
-  case "$merge_line" in
-    *"--profile $CC_PROFILE"*) ;;
-    *) fail "codecommit-merges: the profile should come from the worktree remote, got: $merge_line" ;;
-  esac
-  case "$merge_line" in
-    *"--region $CC_REGION"*) ;;
-    *) fail "codecommit-merges: the region should come from the URL, got: $merge_line" ;;
-  esac
-  pass "a CodeCommit console URL resolves and merges through the AWS CLI"
+    expect_code 0 "$rc" "codecommit-merges-$label: a mergeable CodeCommit PR should merge"
+    assert_grep "pr=$CC_URL" "$case_dir/state/task-x1.meta" \
+      "codecommit-merges-$label: the canonical URL should be recorded"
+    assert_grep "pr_head=$CC_HEAD" "$case_dir/state/task-x1.meta" \
+      "codecommit-merges-$label: the exact head should be recorded"
+    assert_grep "verified: $CC_URL is merged" "$case_dir/stdout" \
+      "codecommit-merges-$label: a proven merge should be reported"
+    merge_line=$(aws_merge_line "$case_dir/aws.log")
+    conflict_line=$(aws_conflict_line "$case_dir/aws.log")
+    case "$merge_line" in
+      *"$api"*) ;;
+      *) fail "codecommit-merges-$label: $api should be the merge API, got: $merge_line" ;;
+    esac
+    case "$conflict_line" in
+      *"--merge-option $option"*) ;;
+      *) fail "codecommit-merges-$label: the conflict read should use $option, got: $conflict_line" ;;
+    esac
+    case "$merge_line" in
+      *"--source-commit-id $CC_HEAD"*) ;;
+      *) fail "codecommit-merges-$label: the merge should be bound to the verified head, got: $merge_line" ;;
+    esac
+    case "$merge_line" in
+      *"--profile $CC_PROFILE"*) ;;
+      *) fail "codecommit-merges-$label: the profile should come from the worktree remote, got: $merge_line" ;;
+    esac
+    case "$merge_line" in
+      *"--region $CC_REGION"*) ;;
+      *) fail "codecommit-merges-$label: the region should come from the URL, got: $merge_line" ;;
+    esac
+    # A fast-forward creates no commit and the API takes no message, so the
+    # option must be absent rather than empty; the other two carry the pull
+    # request's own title.
+    recorded=$(cat "$case_dir/cc-commit-message" 2>/dev/null || printf '<none>')
+    if [ "$method" = --fast-forward ]; then
+      case "$merge_line" in
+        *--commit-message*) fail "codecommit-merges-$label: a fast-forward merge must carry no commit message, got: $merge_line" ;;
+      esac
+      [ -z "$recorded" ] \
+        || fail "codecommit-merges-$label: a commit message reached the fast-forward merge: $recorded"
+    else
+      case "$merge_line" in
+        *"--commit-message=fixture pull request"*) ;;
+        *) fail "codecommit-merges-$label: the title should be carried as one commit-message token, got: $merge_line" ;;
+      esac
+      [ "$recorded" = 'fixture pull request' ] \
+        || fail "codecommit-merges-$label: the title did not reach the merge verbatim, got: $recorded"
+    fi
+  done
+  pass "a CodeCommit console URL resolves and merges under each merge method it accepts"
 }
 
 # A pull request title is forge data and may be shaped like an option. It has to

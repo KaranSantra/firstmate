@@ -2179,17 +2179,24 @@ CC_PROFILE=FixtureAccess-000000000000
 CC_URL="https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27?region=$CC_REGION"
 CC_HEAD=cccccccccccccccccccccccccccccccccccccccc
 
-# An aws mock answering the one read fm-pr-check.sh makes, plus a git remote
-# carrying the profile, because arming derives the profile from that remote.
+# An aws mock answering the one read fm-pr-check.sh and the watch poll make,
+# plus a git remote carrying the profile, because arming derives the profile
+# from that remote. Its answers are files in the case dir, so a test changes one
+# condition at a time, and the defaults are the open unmerged pull request
+# arming expects.
 add_codecommit_fixture() {
   local dir=$1
   cat > "$dir/fakebin/aws" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$dir/aws.log"
+[ ! -e "$dir/cc-fail" ] || exit 255
+status=\$(cat "$dir/cc-status" 2>/dev/null || printf 'OPEN')
+merged=\$(cat "$dir/cc-merged" 2>/dev/null || printf 'false')
+repo=\$(cat "$dir/cc-repo" 2>/dev/null || printf '%s' "$CC_REPO")
 case "\${2:-}" in
   get-pull-request)
-    printf '{"pullRequest":{"pullRequestId":"27","title":"fixture","pullRequestStatus":"OPEN","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":false}}]}}\n' \\
-      "$CC_REPO" "$CC_HEAD"
+    printf '{"pullRequest":{"pullRequestId":"27","title":"fixture","pullRequestStatus":"%s","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":%s}}]}}\n' \\
+      "\$status" "\$repo" "$CC_HEAD" "\$merged"
     ;;
 esac
 exit 0
@@ -2242,6 +2249,96 @@ test_codecommit_arming_is_static_and_private() {
   assert_grep "pr_head=$CC_HEAD" "$dir/home/state/task-a.meta" \
     "codecommit-arming: the exact head was not recorded"
   pass "arming a CodeCommit watch keeps the poll static and confines the profile to the sidecar"
+}
+
+# Every CodeCommit poll case is exercised through both entry paths a watcher
+# cycle uses: the published check reading its own sidecar, and the --validated
+# argument form fm-watch.sh passes from the validated snapshot. They must answer
+# the same, so both are asserted against the same expectation.
+assert_codecommit_poll() {  # <dir> <expected> <message>
+  local dir=$1 expected=$2 message=$3 self validated
+  self=$(run_poll "$dir")
+  validated=$(PATH="$dir/fakebin:$BASE_PATH" bash "$dir/home/state/task-a.check.sh" \
+    --validated codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 "$CC_PROFILE")
+  [ "$self" = "$expected" ] || fail "$message (the sidecar entry path answered '$self')"
+  [ "$validated" = "$expected" ] || fail "$message (the --validated entry path answered '$validated')"
+}
+
+# The poll is what actually detects a CodeCommit merge, so a wrong answer here
+# is a false landed merge rather than silence.
+test_codecommit_merge_watch() {
+  local dir state out
+  dir=$(make_case codecommit-merge-watch)
+  write_task_meta "$dir"
+  add_codecommit_fixture "$dir"
+  state="$dir/home/state"
+
+  run_check_entry "$dir" task-a "$CC_URL" >/dev/null 2>/dev/null \
+    || fail "codecommit-merge-watch: could not arm a CodeCommit poll"
+  : > "$dir/aws.log"
+
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: an open pull request emitted a merge"
+  assert_grep "get-pull-request --pull-request-id 27 --region $CC_REGION --profile $CC_PROFILE" \
+    "$dir/aws.log" \
+    "codecommit-merge-watch: the poll did not address the AWS CLI with the recorded region and profile"
+
+  # CodeCommit closes a pull request whether it was merged or abandoned, so a
+  # closed and unmerged one must stay silent: only isMerged is the signal.
+  printf 'CLOSED' > "$dir/cc-status"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a closed but unmerged pull request emitted a merge"
+
+  printf 'true' > "$dir/cc-merged"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: a merged pull request did not emit exactly one merged line"
+
+  # The pull request stays merged through these, so each one proves the poll
+  # stays silent on what it cannot read or match rather than on nothing.
+  : > "$dir/cc-fail"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a failed AWS call emitted a merge"
+  rm -f "$dir/cc-fail"
+  printf 'Other-Repo' > "$dir/cc-repo"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a pull request targeting another repository emitted a merge"
+  rm -f "$dir/cc-repo"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: the merged fixture stopped being read after the silent cases"
+
+  # A doctored sidecar cannot redirect the poll at another region, repository or
+  # number, and cannot smuggle a credential the arming validator would refuse.
+  # Every component is revalidated before the AWS CLI is reached at all.
+  : > "$dir/aws.log"
+  while IFS='|' read -r sc_host sc_path sc_number sc_credential; do
+    [ -n "$sc_host" ] || continue
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      codecommit "$CC_URL" "$sc_host" "$sc_path" "$sc_number" "$sc_credential" \
+      > "$state/task-a.pr-poll"
+    out=$(run_poll "$dir")
+    [ -z "$out" ] || fail "codecommit-merge-watch: a doctored sidecar emitted a merge: $sc_host|$sc_path|$sc_number|$sc_credential"
+  done <<EOF
+eu-west-1.console.aws.amazon.com|$CC_REPO|27|$CC_PROFILE
+$CC_HOST|Other-Repo|27|$CC_PROFILE
+$CC_HOST|$CC_REPO|28|$CC_PROFILE
+$CC_HOST|$CC_REPO|27|-Not-A-Profile
+$CC_HOST|$CC_REPO|27|
+EOF
+  [ ! -s "$dir/aws.log" ] \
+    || fail "codecommit-merge-watch: a doctored sidecar still reached the AWS CLI"
+
+  # A codecommit record must carry a profile: without one the AWS CLI would fall
+  # back to the default credential chain the profile exists to override.
+  printf '%s\n%s\n%s\n%s\n%s\n' codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 \
+    > "$state/task-a.pr-poll"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "codecommit-merge-watch: a sidecar carrying no AWS profile emitted a merge"
+
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 "$CC_PROFILE" > "$state/task-a.pr-poll"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: the restored sidecar did not read the merge again"
+  pass "a CodeCommit merge wakes the watch only on isMerged for its own repository"
 }
 
 # Replace the fixture's aws with one that cannot answer for this repository, the
@@ -2387,5 +2484,6 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_codecommit_arming_is_static_and_private
+test_codecommit_merge_watch
 test_codecommit_arming_refuses_without_a_profile
 test_codecommit_arming_refuses_an_unreadable_pull_request

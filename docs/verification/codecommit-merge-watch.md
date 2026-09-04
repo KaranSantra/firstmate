@@ -155,6 +155,10 @@ codecommit get-merge-conflicts --repository-name Modus-Adyen-Client --source-com
 codecommit merge-pull-request-by-squash --pull-request-id 27 --repository-name Modus-Adyen-Client --source-commit-id 6eb630be7f28c293debcd02391621d75479595ba --commit-message Phase 1 Wave 1: application scaffold + plan 01-01 (domain schema, migrations, seed) --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
 ```
 
+The `merge-pull-request-by-squash` line above predates commit 8e49224 and is left exactly as it was captured.
+That commit changed how the commit message is carried: the shipped code now emits `--commit-message=VALUE` as a single token, rather than `--commit-message` followed by a separate value token as the capture shows, so a run today logs that one position in the single-token form.
+Read the argv reasoning below against that current form; `git show 8e49224` is the change itself.
+
 The region and profile are on every call, taken from the URL and the remote rather than any ambient default.
 The conflict read asks for the same `SQUASH_MERGE` the merge itself uses.
 `--source-commit-id` carries the head that was just verified, so a push landing between the read and the merge is refused by CodeCommit instead of merged unverified, exactly as `--sha` does on GitLab.
