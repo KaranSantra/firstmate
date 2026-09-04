@@ -2218,9 +2218,9 @@ test_codecommit_url_resolves_and_merges() {
   # perform it another, and still report itself verified.
   for method in '' --merge --fast-forward; do
     case "$method" in
-      '') api=merge-pull-request-by-squash; option=SQUASH_MERGE; label=default-squash ;;
-      --merge) api=merge-pull-request-by-three-way; option=THREE_WAY_MERGE; label=merge ;;
-      --fast-forward) api=merge-pull-request-by-fast-forward; option=FAST_FORWARD_MERGE; label=fast-forward ;;
+      '') api='merge-pull-request-by-squash'; option=SQUASH_MERGE; label='default-squash' ;;
+      --merge) api='merge-pull-request-by-three-way'; option=THREE_WAY_MERGE; label=merge ;;
+      --fast-forward) api='merge-pull-request-by-fast-forward'; option=FAST_FORWARD_MERGE; label='fast-forward' ;;
     esac
     case_dir=$(make_codecommit_case "codecommit-merges-$label")
 
