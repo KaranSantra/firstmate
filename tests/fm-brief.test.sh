@@ -846,6 +846,57 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The captain's standing instruction is that browser work drives his real,
+# logged-in Chrome; `chrome-devtools-axi` launches a separate "Chrome for
+# Testing" application that carries none of his logins, so its "not signed in"
+# verdicts are meaningless and every launch pops a window on his screen. The
+# scaffold used to instruct every worker to use exactly that tool, and a worker
+# also stood up a throwaway web server to look at its own HTML. Both halves of
+# the corrected rule are pinned here so neither can drift back.
+test_browser_rule_drives_the_captains_real_chrome() {
+  local home brief kind
+  home="$TMP_ROOT/browser-rule-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout secondmate; do
+    case "$kind" in
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" some-proj --scout \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+      secondmate)
+        FM_SECONDMATE_CHARTER='Supervise the sample domain.' \
+          FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" --secondmate some-proj \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+      *)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" some-proj --mode "$kind" \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+    esac
+    brief="$home/data/browser-rule-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # The tool may appear only inside a prohibition, never as an instruction, so
+    # this stays true however the surrounding wording is later rephrased.
+    if grep -n 'chrome-devtools-axi' "$brief" | grep -qvi 'never'; then
+      fail "$kind brief mentions chrome-devtools-axi outside a prohibition; it opens a separate browser with none of the captain's logins"
+    fi
+  done
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    brief="$home/data/browser-rule-$kind/brief.md"
+    assert_grep 'mcp__claude-in-chrome__' "$brief" \
+      "$kind brief did not point browser work at the captain's real Chrome"
+    assert_grep "never to preview or check your own HTML output" "$brief" \
+      "$kind brief did not forbid opening a browser to look at the worker's own output"
+    assert_grep "never start a web server to view your own" "$brief" \
+      "$kind brief did not forbid standing up a server to view the worker's own output"
+    assert_grep "gh-axi for GitHub operations" "$brief" \
+      "$kind brief lost the gh-axi instruction"
+  done
+  pass "fm-brief.sh: browser work drives the captain's real Chrome and never previews the worker's own output"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -891,3 +942,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_browser_rule_drives_the_captains_real_chrome

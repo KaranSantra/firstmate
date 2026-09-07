@@ -370,7 +370,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations.
+   Browser work drives the captain's real Chrome through the \`mcp__claude-in-chrome__*\` tools;
+   never \`chrome-devtools-axi\`, which opens a separate empty browser carrying none of his logins.
+   Open a browser only when the task needs that signed-in session or real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -457,7 +462,12 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations.
+   Browser work drives the captain's real Chrome through the \`mcp__claude-in-chrome__*\` tools;
+   never \`chrome-devtools-axi\`, which opens a separate empty browser carrying none of his logins.
+   Open a browser only when the task needs that signed-in session or real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
