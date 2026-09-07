@@ -2396,6 +2396,77 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
+# Resolve origin's CURRENT default branch for a pooled worktree from one ref
+# advertisement, rather than trusting `git remote set-head origin --auto`.
+# `--auto` is decisive only while the remote advertises a HEAD symref. AWS
+# CodeCommit advertises none, so git falls back to guessing which branch HEAD's
+# commit belongs to, and a fast-forward merge that leaves the merged source
+# branch in place puts two branches on that commit and makes the guess ambiguous
+# - which blocks every later spawn on that project until someone deletes a
+# branch. Ambiguity there is not the same as ignorance: every candidate IS at
+# origin's current HEAD commit, so a previously recorded origin/HEAD naming one
+# of them is still a live, corroborated answer and is accepted. A recorded
+# origin/HEAD that names none of them is stale or contradicted and is refused,
+# as is a remote whose HEAD matches no branch at all, because a wrong base is
+# exactly the harm the caller's guard exists to prevent.
+# Echoes the branch name, or returns 1 when the default branch is genuinely
+# undeterminable.
+spawn_origin_default_branch() {  # <worktree>
+  local worktree=$1 advertised field ref name
+  local symref='' head_sha='' heads='' candidates='' recorded='' candidate_count=0
+  advertised=$(git -C "$worktree" ls-remote --symref origin 2>/dev/null) || return 1
+  while IFS=$'\t' read -r field ref; do
+    case $field in
+      'ref: refs/heads/'*)
+        [ "$ref" = HEAD ] || continue
+        symref=${field#'ref: refs/heads/'}
+        ;;
+      *)
+        case $ref in
+          HEAD) head_sha=$field ;;
+          refs/heads/*) heads+="${ref#refs/heads/}"$'\t'"$field"$'\n' ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$advertised
+EOF
+
+  # An advertised symref is the remote stating its own default branch, so it
+  # settles the question - but only for a branch the same advertisement lists.
+  if [ -n "$symref" ]; then
+    case $heads in
+      *$'\n'"$symref"$'\t'* | "$symref"$'\t'*) printf '%s\n' "$symref"; return 0 ;;
+    esac
+    return 1
+  fi
+
+  [ -n "$head_sha" ] || return 1
+  while IFS=$'\t' read -r name field; do
+    [ -n "$name" ] || continue
+    [ "$field" = "$head_sha" ] || continue
+    candidates+="$name"$'\n'
+    candidate_count=$((candidate_count + 1))
+  done <<EOF
+$heads
+EOF
+
+  # Exactly one branch at origin's HEAD commit is the unambiguous guess
+  # `--auto` would have made, and live remote evidence outranks any local record.
+  if [ "$candidate_count" = 1 ]; then
+    printf '%s' "$candidates"
+    return 0
+  fi
+  [ "$candidate_count" -gt 1 ] || return 1
+
+  recorded=$(git -C "$worktree" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  case $recorded in refs/remotes/origin/?*) recorded=${recorded#refs/remotes/origin/} ;; *) return 1 ;; esac
+  case $candidates in
+    *$'\n'"$recorded"$'\n'* | "$recorded"$'\n'*) printf '%s\n' "$recorded"; return 0 ;;
+  esac
+  return 1
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -2417,17 +2488,19 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+  default=$(spawn_origin_default_branch "$worktree") || {
     echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  # Record the resolved answer so this worktree's own origin/HEAD stays correct
+  # for every later reader, including the next spawn's ambiguous-case fallback.
+  if ! git -C "$worktree" remote set-head origin "$default" >/dev/null 2>&1; then
+    echo "error: could not record origin's default branch '$default' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
