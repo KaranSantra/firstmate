@@ -938,6 +938,58 @@ test_synthetic_identifiers_rule() {
   pass "fm-brief.sh: every worker scaffold forbids real identifiers and supplies synthetic ones"
 }
 
+# --chrome selects which browser paragraph the Rules carry, and the two variants
+# must disagree about what the worker HAS while agreeing on the captain's rule.
+# The default must never instruct a worker to reach for the claude-in-chrome
+# tools, because bin/fm-spawn.sh launches that worker with claude's --no-chrome
+# and the tools are genuinely absent from its session.
+test_chrome_flag_selects_the_browser_paragraph() {
+  local home granted plain kind
+  home="$TMP_ROOT/chrome-flag-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-on-$kind" some-proj --scout --chrome \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind --chrome scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-off-$kind" some-proj --scout \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-on-$kind" some-proj --mode "$kind" --chrome \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind --chrome scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-off-$kind" some-proj --mode "$kind" \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    fi
+    granted="$home/data/chrome-on-$kind/brief.md"
+    plain="$home/data/chrome-off-$kind/brief.md"
+    assert_present "$granted" "$kind --chrome brief was not scaffolded"
+    assert_present "$plain" "$kind default brief was not scaffolded"
+
+    assert_grep "real, signed-in Chrome attached" "$granted" \
+      "$kind --chrome brief did not tell the worker it has the captain's browser"
+    assert_grep "NO browser attached" "$plain" \
+      "$kind default brief did not tell the worker the browser is absent"
+    # The escape hatch only belongs in the variant that has no browser.
+    assert_grep "blocked: needs the captain's browser" "$plain" \
+      "$kind default brief gave the worker no way to ask for the captain's browser"
+    if grep -q "blocked: needs the captain's browser" "$granted"; then
+      fail "$kind --chrome brief told a worker that already has the browser to ask for it"
+    fi
+    # The two variants must actually differ, so neither can go quietly vacuous.
+    if diff -q "$granted" "$plain" >/dev/null 2>&1; then
+      fail "$kind --chrome and default briefs are identical; the flag changed nothing"
+    fi
+    # The captain's standing rule survives in both.
+    if grep -n 'chrome-devtools-axi' "$granted" | grep -qvi 'never'; then
+      fail "$kind --chrome brief mentions chrome-devtools-axi outside a prohibition"
+    fi
+    if grep -n 'chrome-devtools-axi' "$plain" | grep -qvi 'never'; then
+      fail "$kind default brief mentions chrome-devtools-axi outside a prohibition"
+    fi
+  done
+  pass "fm-brief.sh: --chrome selects the browser paragraph and the default never promises absent tools"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -985,3 +1037,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_browser_rule_drives_the_captains_real_chrome
 test_synthetic_identifiers_rule
+test_chrome_flag_selects_the_browser_paragraph

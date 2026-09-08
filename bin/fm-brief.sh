@@ -12,8 +12,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--chrome]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--chrome]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -28,6 +28,14 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --chrome states that this worker WILL be launched with the captain's real,
+#   signed-in Chrome attached, and must match the --chrome passed to
+#   bin/fm-spawn.sh. It only changes which browser paragraph the Rules carry:
+#   a granted brief points at the `mcp__claude-in-chrome__*` tools the worker
+#   actually has, while the default brief says the browser is absent and tells
+#   the worker to stop and ask rather than reaching for tools that are not
+#   there. The captain's standing rule - his real Chrome, never the sandboxed
+#   chrome-devtools-axi - is carried by both.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -118,6 +126,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+CHROME=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -139,6 +148,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --chrome) CHROME=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -311,6 +321,35 @@ fi
 
 REPO=${POS[1]}
 
+# The browser paragraph, stated once for both the ship and scout Rules. Which
+# variant is written must match how bin/fm-spawn.sh launches the worker: that
+# script passes claude's --chrome only for a --chrome spawn and --no-chrome
+# otherwise, so a default brief that told the worker to reach for
+# `mcp__claude-in-chrome__*` would be naming tools its session does not have.
+# The captain's standing rule holds in both variants: his real, signed-in Chrome
+# through the extension, never the sandboxed chrome-devtools-axi, whose separate
+# empty browser carries none of his logins and has already produced one wrong
+# "not signed in" report.
+if [ "$CHROME" -eq 1 ]; then
+  BROWSER_RULE="   This session is launched with the captain's real, signed-in Chrome attached: drive it
+   with the \`mcp__claude-in-chrome__*\` tools. Never \`chrome-devtools-axi\`, which opens a
+   separate empty browser carrying none of his logins.
+   You are borrowing the captain's own logged-in browser, so treat it as his: read freely,
+   but anything that sends, buys, posts, deletes, or changes an account setting stops and asks.
+   Open a browser only when the task needs that signed-in session or real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks."
+else
+  BROWSER_RULE="   This session is launched with NO browser attached, so the \`mcp__claude-in-chrome__*\` tools
+   are absent. Never reach for \`chrome-devtools-axi\` in their place: it opens a separate empty
+   browser carrying none of the captain's logins, so what it reports about any signed-in site
+   is meaningless.
+   If this task genuinely needs the captain's signed-in browser or real application behavior,
+   append \`blocked: needs the captain's browser\` and stop; firstmate relaunches you with it
+   attached. Open a browser only for that signed-in session or real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks."
+fi
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -371,11 +410,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations.
-   Browser work drives the captain's real Chrome through the \`mcp__claude-in-chrome__*\` tools;
-   never \`chrome-devtools-axi\`, which opens a separate empty browser carrying none of his logins.
-   Open a browser only when the task needs that signed-in session or real application behavior -
-   never to preview or check your own HTML output, and never start a web server to view your own
-   work; verify those by reading the file and by static checks.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -470,11 +505,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations.
-   Browser work drives the captain's real Chrome through the \`mcp__claude-in-chrome__*\` tools;
-   never \`chrome-devtools-axi\`, which opens a separate empty browser carrying none of his logins.
-   Open a browser only when the task needs that signed-in session or real application behavior -
-   never to preview or check your own HTML output, and never start a web server to view your own
-   work; verify those by reading the file and by static checks.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
