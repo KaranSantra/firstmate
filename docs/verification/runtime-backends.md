@@ -267,8 +267,8 @@ A compartment is a Chrome browser context inside the one work browser.
 Measured on a throwaway work browser with two seeded site logins, handing over one:
 
 ```
-shared jar : adyen.example, zentact.example
-compartment: zentact.example
+shared jar : site-a.example, site-b.example
+compartment: site-a.example
 ```
 
 A cookie added to the shared jar *after* sealing did not reach the compartment, so a later sign-in cannot widen an existing worker's blast radius:
