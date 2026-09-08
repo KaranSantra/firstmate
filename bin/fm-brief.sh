@@ -28,6 +28,14 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --browser states which browser grant bin/fm-spawn.sh gives this worker, and
+#   must match the --browser passed there. `clean` is a throwaway profile with
+#   no logins; `fleet` is the captain's one shared signed-in profile, which
+#   Chrome's profile lock hands to one worker at a time. It only changes the
+#   Rules' browser paragraph, which then carries the operating rules that
+#   actually bite: the session name and port are already set and must not be
+#   overridden, a modal dialog must be answered by the very next command or the
+#   page is destroyed, and the worker must never stop another session.
 #   --chrome states that this worker WILL be launched with the captain's real,
 #   signed-in Chrome attached, and must match the --chrome passed to
 #   bin/fm-spawn.sh. It only changes which browser paragraph the Rules carry:
@@ -127,6 +135,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 CHROME=0
+BROWSER=
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -139,6 +148,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      browser) BROWSER=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -149,6 +159,8 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --chrome) CHROME=1 ;;
+    --browser) want_value=browser ;;
+    --browser=*) BROWSER=${a#--browser=} ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -181,6 +193,14 @@ elif [ "$MODE_SET" -eq 1 ]; then
 fi
 ID=${POS[0]}
 
+case "$BROWSER" in
+  ''|clean|fleet) ;;
+  *) echo "error: --browser must be clean or fleet, matching the --browser passed to bin/fm-spawn.sh" >&2; exit 1 ;;
+esac
+if [ -n "$BROWSER" ] && [ "$CHROME" -eq 1 ]; then
+  echo "error: --chrome and --browser are different browsers and cannot be combined" >&2
+  exit 1
+fi
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
@@ -330,7 +350,40 @@ REPO=${POS[1]}
 # through the extension, never the sandboxed chrome-devtools-axi, whose separate
 # empty browser carries none of his logins and has already produced one wrong
 # "not signed in" report.
-if [ "$CHROME" -eq 1 ]; then
+if [ -n "$BROWSER" ]; then
+  # A granted worker already HAS its browser: the launch set a unique session
+  # name and an explicit port for it. Both of those failures are silent - two
+  # workers on one session name quietly read each other's pages, and the
+  # default hashed port collides across lanes - so the rule here is "do not
+  # override", not "remember to set".
+  if [ "$BROWSER" = fleet ]; then
+    BROWSER_WHICH="   You have the captain's SHARED signed-in browser profile, already logged in to his
+   work sites. Only one worker may hold it at a time; Chrome enforces that itself and refuses
+   cleanly. If a command reports the profile is already in use, that is the expected refusal and
+   not a fault: append \`paused: waiting for the shared browser profile\` and stop. Do not retry in
+   a loop, do not point the tool at a different profile, and do not sign in to anything yourself.
+   Treat it as the captain's own account: read freely, but anything that sends, buys, posts,
+   deletes, or changes an account setting stops and asks."
+  else
+    BROWSER_WHICH="   You have your own throwaway browser profile. It carries NO logins, so any page behind a
+   sign-in will show you a signed-out view - that result is meaningless as evidence, and if the
+   task needs a signed-in session, append \`blocked: needs the signed-in browser profile\` and stop
+   rather than reporting what a logged-out browser showed."
+  fi
+  BROWSER_RULE="   Drive the browser with \`chrome-devtools-axi\`. Never the \`mcp__claude-in-chrome__*\` tools:
+   those drive the captain's own browser and are reserved for him.
+$BROWSER_WHICH
+   Your session name and port are already set in your environment. Never set, change, or unset
+   \`CHROME_DEVTOOLS_AXI_SESSION\`, \`CHROME_DEVTOOLS_AXI_PORT\` or \`CHROME_DEVTOOLS_AXI_USER_DATA_DIR\`,
+   and never run \`chrome-devtools-axi stop\` for any session but your own - other workers are using
+   theirs, and a wrong session name silently mixes your pages up with theirs.
+   If a command reports an open dialog, the VERY NEXT command must be \`dialog accept\` or
+   \`dialog dismiss\`. Any other command in between destroys the page unrecoverably.
+   File upload is broken in the current version; do not build the task around it.
+   Open a browser only when the task needs real application behavior - never to preview or check
+   your own HTML output, and never start a web server to view your own work; verify those by
+   reading the file and by static checks."
+elif [ "$CHROME" -eq 1 ]; then
   BROWSER_RULE="   This session is launched with the captain's real, signed-in Chrome attached: drive it
    with the \`mcp__claude-in-chrome__*\` tools. Never \`chrome-devtools-axi\`, which opens a
    separate empty browser carrying none of his logins.
@@ -340,13 +393,13 @@ if [ "$CHROME" -eq 1 ]; then
    never to preview or check your own HTML output, and never start a web server to view your own
    work; verify those by reading the file and by static checks."
 else
-  BROWSER_RULE="   This session is launched with NO browser attached, so the \`mcp__claude-in-chrome__*\` tools
-   are absent. Never reach for \`chrome-devtools-axi\` in their place: it opens a separate empty
-   browser carrying none of the captain's logins, so what it reports about any signed-in site
-   is meaningless.
-   If this task genuinely needs the captain's signed-in browser or real application behavior,
-   append \`blocked: needs the captain's browser\` and stop; firstmate relaunches you with it
-   attached. Open a browser only for that signed-in session or real application behavior -
+  BROWSER_RULE="   This session is launched with NO browser at all, so neither the \`mcp__claude-in-chrome__*\`
+   tools nor a \`chrome-devtools-axi\` browser of your own is available to you. Never reach for
+   either: the extension drives the captain's own browser and is reserved for him, and an
+   unrequested browser costs about 0.65GB on a machine that is already short of memory.
+   If this task genuinely needs a browser, append \`blocked: needs a browser\` and stop, saying
+   whether it needs a signed-in session; firstmate relaunches you with the right one.
+   Open a browser only when the task needs real application behavior -
    never to preview or check your own HTML output, and never start a web server to view your own
    work; verify those by reading the file and by static checks."
 fi

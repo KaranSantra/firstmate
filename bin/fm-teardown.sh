@@ -218,6 +218,19 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - stop the task's browser session. A worker granted a browser with
+#     bin/fm-spawn.sh's --browser leaves a full Chrome plus its Node control
+#     plane resident - measured at roughly 680MB - for as long as the machine
+#     is up unless the session is explicitly stopped; every `open` without a
+#     matching `stop` leaks one, and a crashed worker orphans one that nothing
+#     else ever reaps (12.3GB of exactly this was measured on the captain's
+#     machine in data/fm-chrome-devtools-axi-review/report.md). The stop is
+#     driven from the task record rather than from a live worker, so it still
+#     runs when the worker is already gone, and it targets only this task's own
+#     session name and port so a sibling lane's browser is never touched.
+#     Idempotent: stopping a session that was never started is a no-op. Best
+#     effort like Fix 3 - a stop failure never blocks the teardown - but it is
+#     reported so a leak is visible rather than silent.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -235,6 +248,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -3182,6 +3197,12 @@ fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  # Fix 4 (see script header): stop this task's browser before the record that
+  # names it is removed, or nothing is left that could ever identify the leak.
+  TEARDOWN_BROWSER=$(meta_value "$META" browser)
+  if [ -n "$TEARDOWN_BROWSER" ]; then
+    fm_browser_stop_session "$ID" "$(meta_value "$META" browser_port)" || true
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

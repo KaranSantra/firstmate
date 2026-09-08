@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--chrome]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--chrome]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|fleet>] [--chrome]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|fleet>] [--chrome]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -26,6 +26,29 @@
 #   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
 #   using the same private launch-brief overlay. This never rewrites a project's
 #   instruction files or a secondmate's charter.
+#   --browser gives this worker its own browser through chrome-devtools-axi, as
+#   an OPT-IN per task and on any harness. Two grants, both isolated from the
+#   captain's own Chrome:
+#     clean  a throwaway profile carrying no logins. Runs in parallel with other
+#            clean workers, up to the cap below.
+#     fleet  the ONE shared profile the captain signed into once for the work
+#            sites. Chrome's own profile lock serialises workers, refusing a
+#            second one cleanly rather than corrupting the profile; that
+#            serialisation is the accepted price of signed-in access, and
+#            firstmate deliberately adds no lock of its own on top of it.
+#            config/browser-fleet-profile may hold an absolute path so several
+#            homes share one profile and he signs in once, not once per home.
+#   The launch carries a unique session name (the task id) and an explicit port,
+#   because both failures are silent: two workers on one session name share a
+#   browser and read each other's pages, and the tool's default hashed port
+#   collides across lanes and then kills that worker's name permanently.
+#   Refused above config/browser-worker-cap (default 4, measured ceiling 6) since
+#   each worker costs about 0.65GB and they do not share; that count covers this
+#   home only, which the refusal says rather than implies. Recorded as browser=
+#   and browser_port= so a relaunch keeps the same grant and reattaches to the
+#   same session, and so bin/fm-teardown.sh knows it must stop that browser -
+#   without which roughly 680MB leaks per worker for as long as the machine is
+#   up. bin/fm-browser-lib.sh owns the whole contract and its measured basis.
 #   --chrome grants this worker the captain's real, signed-in Chrome through the
 #   claude-in-chrome extension, by launching the agent with claude's own --chrome
 #   flag. It is OPT-IN per task and claude-only: pass it when the task genuinely
@@ -315,7 +338,7 @@
 # items), on a config/backlog-backend=manual home, and in a home that keeps no
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
 # tasks-axi refuses before creating any lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [chrome=on] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [chrome=on] [browser=<clean|fleet>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -423,6 +446,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -463,6 +488,10 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 CHROME=off
 CHROME_SET=0
+BROWSER=
+BROWSER_SET=0
+BROWSER_PORT=
+BROWSER_PROFILE=
 RELAUNCH=0
 POS=()
 want_value=
@@ -479,6 +508,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      browser) BROWSER=$a; BROWSER_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -503,6 +533,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --browser) want_value=browser ;;
+    --browser=*) BROWSER=${a#--browser=}; BROWSER_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -514,6 +546,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$BROWSER_SET" -eq 0 ] || [ -n "$BROWSER" ] || { echo "error: --browser requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -532,6 +565,22 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
+# The captain's browser model (bin/fm-browser-lib.sh owns it): `clean` is a
+# throwaway isolated profile that runs in parallel, `fleet` is the one shared
+# profile he signed into once, serialised across workers by Chrome's own profile
+# lock. Absent means no browser at all, which is the default and the cheap case.
+if [ "$BROWSER_SET" -eq 1 ] && ! fm_browser_mode_valid "$BROWSER"; then
+  echo "error: --browser must be clean (throwaway profile, parallel, no logins) or fleet (the captain's one shared signed-in profile, one worker at a time)" >&2
+  exit 1
+fi
+# The extension is reserved for the captain's own browser; --browser is the
+# fleet route. Granting both would give one worker two competing browsers and
+# put it back in contention for his.
+if [ "$BROWSER_SET" -eq 1 ] && [ "$CHROME" = on ]; then
+  echo "error: --chrome and --browser are different browsers and cannot be combined; --browser is the fleet route, while --chrome borrows the captain's own Chrome through the extension" >&2
+  exit 1
+fi
+
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
@@ -542,6 +591,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
   [ "$CHROME_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded browser access; --chrome cannot override it" >&2; exit 1; }
+  [ "$BROWSER_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded browser grant; --browser cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -1300,6 +1350,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # recorded before this flag existed.
   CHROME=$(fm_meta_get "$RELAUNCH_META" chrome)
   [ "$CHROME" = on ] || CHROME=off
+  # The replacement worker keeps the same grant AND the same port, so it
+  # reattaches to its own session rather than stranding the old browser.
+  BROWSER=$(fm_meta_get "$RELAUNCH_META" browser)
+  BROWSER_PORT=$(fm_meta_get "$RELAUNCH_META" browser_port)
+  fm_browser_mode_valid "$BROWSER" || BROWSER=
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1662,6 +1717,40 @@ fi
 if [ "$CHROME" = on ] && [ "$HARNESS" != claude ]; then
   echo "error: --chrome grants the captain's real Chrome through the claude-in-chrome extension, which only the claude harness speaks; harness '$HARNESS' cannot reach it. Spawn browser work on claude, or drop --chrome." >&2
   exit 1
+fi
+
+# Resolve the browser grant before anything durable exists, so a refusal costs
+# no endpoint, worktree, or record. Unlike --chrome this is harness-agnostic:
+# chrome-devtools-axi is a command the worker runs, not a harness feature.
+if [ -n "$BROWSER" ]; then
+  if ! command -v chrome-devtools-axi >/dev/null 2>&1; then
+    echo "error: --browser needs chrome-devtools-axi on PATH and it is not installed" >&2
+    exit 1
+  fi
+  # ~0.65GB per browser worker, scaling linearly with no economy of scale, on a
+  # machine already at memory pressure. The cap counts THIS home only; other
+  # lanes' browsers are invisible from here, which the refusal says plainly
+  # rather than implying a machine-wide guarantee it cannot make.
+  if [ "$RELAUNCH" -eq 0 ]; then
+    BROWSER_CAP=$(fm_browser_cap "$CONFIG") || exit 1
+    BROWSER_LIVE=$(fm_browser_granted_count "$STATE" "$ID")
+    if [ "$BROWSER_LIVE" -ge "$BROWSER_CAP" ]; then
+      echo "error: this home already holds $BROWSER_LIVE browser worker(s) and the cap is $BROWSER_CAP; each costs about 0.65GB and they do not share. Finish or clean up one first, or raise config/browser-worker-cap (6 is the measured ceiling on this machine). Browser workers in other homes are not counted here." >&2
+      exit 1
+    fi
+  fi
+  # A recorded port is reused so a relaunched worker reattaches to its own
+  # session instead of stranding the browser the old one left running.
+  if [ -z "$BROWSER_PORT" ]; then
+    BROWSER_PORT=$(fm_browser_allocate_port "$STATE" "$ID") || exit 1
+  fi
+  if [ "$BROWSER" = fleet ]; then
+    BROWSER_PROFILE=$(fm_browser_fleet_profile "$CONFIG" "$DATA") || exit 1
+    mkdir -p "$BROWSER_PROFILE" 2>/dev/null || {
+      echo "error: could not create the shared fleet browser profile at $BROWSER_PROFILE" >&2
+      exit 1
+    }
+  fi
 fi
 
 case "$HARNESS" in
@@ -3677,7 +3766,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo chrome tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo chrome browser browser_port tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3695,6 +3784,10 @@ preserve_relaunch_meta() {
   # Written only when granted, so an ordinary task's meta stays byte-identical
   # and an absent chrome= line keeps meaning "no browser".
   [ "$CHROME" != on ] || echo "chrome=on"
+  # Recorded so a relaunch keeps the same grant and port, and so teardown
+  # knows there is a browser session it must stop.
+  [ -z "$BROWSER" ] || echo "browser=$BROWSER"
+  [ -z "$BROWSER" ] || echo "browser_port=$BROWSER_PORT"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -3875,6 +3968,21 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Carry the browser grant as a launch environment prefix rather than as brief
+# prose. The unique session name and explicit port are the two settings whose
+# absence fails SILENTLY - two workers sharing one browser, or a permanently
+# dead worker name after a hashed-port collision - so they are properties of how
+# the worker was started, not instructions it could overlook.
+if [ -n "$BROWSER" ]; then
+  browser_prefix=
+  while IFS= read -r browser_env; do
+    [ -n "$browser_env" ] || continue
+    browser_prefix="$browser_prefix${browser_env%%=*}=$(shell_quote "${browser_env#*=}") "
+  done <<BROWSERENV
+$(fm_browser_launch_env "$BROWSER" "$ID" "$BROWSER_PORT" "$BROWSER_PROFILE")
+BROWSERENV
+  LAUNCH="$browser_prefix$LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -4114,4 +4222,5 @@ SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 SPAWN_CHROME=
 [ "$CHROME" != on ] || SPAWN_CHROME=" chrome=on"
+[ -z "$BROWSER" ] || SPAWN_CHROME="$SPAWN_CHROME browser=$BROWSER"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_CHROME window=$META_WINDOW worktree=$WT"

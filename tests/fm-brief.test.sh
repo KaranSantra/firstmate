@@ -967,13 +967,13 @@ test_chrome_flag_selects_the_browser_paragraph() {
 
     assert_grep "real, signed-in Chrome attached" "$granted" \
       "$kind --chrome brief did not tell the worker it has the captain's browser"
-    assert_grep "NO browser attached" "$plain" \
+    assert_grep "NO browser at all" "$plain" \
       "$kind default brief did not tell the worker the browser is absent"
     # The escape hatch only belongs in the variant that has no browser.
-    assert_grep "blocked: needs the captain's browser" "$plain" \
-      "$kind default brief gave the worker no way to ask for the captain's browser"
-    if grep -q "blocked: needs the captain's browser" "$granted"; then
-      fail "$kind --chrome brief told a worker that already has the browser to ask for it"
+    assert_grep "blocked: needs a browser" "$plain" \
+      "$kind default brief gave the worker no way to ask for a browser"
+    if grep -q "blocked: needs a browser" "$granted"; then
+      fail "$kind --chrome brief told a worker that already has a browser to ask for one"
     fi
     # The two variants must actually differ, so neither can go quietly vacuous.
     if diff -q "$granted" "$plain" >/dev/null 2>&1; then
@@ -988,6 +988,68 @@ test_chrome_flag_selects_the_browser_paragraph() {
     fi
   done
   pass "fm-brief.sh: --chrome selects the browser paragraph and the default never promises absent tools"
+}
+
+# --browser clean|fleet must produce briefs that differ from each other and from
+# the no-browser default, and each must carry the operating rules whose absence
+# fails silently: never override the session name or port, and answer a modal
+# with the very next command or lose the page.
+test_browser_grant_paragraphs() {
+  local home clean fleet none kind
+  home="$TMP_ROOT/browser-grant-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-clean-$kind" p --scout --browser clean >/dev/null 2>&1 \
+        || fail "scout --browser clean scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-fleet-$kind" p --scout --browser fleet >/dev/null 2>&1 \
+        || fail "scout --browser fleet scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-none-$kind" p --scout >/dev/null 2>&1 \
+        || fail "scout default scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-clean-$kind" p --mode "$kind" --browser clean >/dev/null 2>&1 \
+        || fail "$kind --browser clean scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-fleet-$kind" p --mode "$kind" --browser fleet >/dev/null 2>&1 \
+        || fail "$kind --browser fleet scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-none-$kind" p --mode "$kind" >/dev/null 2>&1 \
+        || fail "$kind default scaffold exited non-zero"
+    fi
+    clean="$home/data/bg-clean-$kind/brief.md"
+    fleet="$home/data/bg-fleet-$kind/brief.md"
+    none="$home/data/bg-none-$kind/brief.md"
+
+    # All three must be genuinely different documents.
+    if diff -q "$clean" "$fleet" >/dev/null 2>&1; then
+      fail "$kind clean and fleet briefs are identical; the grant changed nothing"
+    fi
+    if diff -q "$clean" "$none" >/dev/null 2>&1; then
+      fail "$kind clean and no-browser briefs are identical; the grant changed nothing"
+    fi
+
+    for brief in "$clean" "$fleet"; do
+      assert_grep "chrome-devtools-axi" "$brief" \
+        "granted brief did not name the fleet browser tool"
+      assert_grep "CHROME_DEVTOOLS_AXI_SESSION" "$brief" \
+        "granted brief did not warn against overriding the session name"
+      assert_grep "VERY NEXT command must be" "$brief" \
+        "granted brief lost the modal-dialog rule that costs the page when broken"
+      # The extension is the captain's; a granted worker must be told not to use it.
+      if grep -n 'mcp__claude-in-chrome__' "$brief" | grep -qvi 'never'; then
+        fail "granted brief pointed a fleet worker at the captain's own browser"
+      fi
+    done
+
+    # Only the fleet grant describes serialisation; only clean warns about logins.
+    assert_grep "one worker may hold it at a time" "$fleet" \
+      "fleet brief did not explain that the shared profile is taken one at a time"
+    assert_grep "carries NO logins" "$clean" \
+      "clean brief did not warn that a signed-out view is meaningless evidence"
+    if grep -q "one worker may hold it at a time" "$clean"; then
+      fail "clean brief claimed the shared-profile serialisation it does not have"
+    fi
+  done
+  pass "fm-brief.sh: --browser clean and fleet carry their own grant and operating rules"
 }
 
 test_worker_role_scope() {
@@ -1038,3 +1100,4 @@ test_scout_and_secondmate_scaffold
 test_browser_rule_drives_the_captains_real_chrome
 test_synthetic_identifiers_rule
 test_chrome_flag_selects_the_browser_paragraph
+test_browser_grant_paragraphs
