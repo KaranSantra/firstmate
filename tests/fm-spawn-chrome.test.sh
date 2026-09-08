@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh's browser grants: --browser clean|fleet
-# (chrome-devtools-axi, the fleet route) and --chrome (the captain's own Chrome
-# through the extension, the rare exception).
+# Behavior tests for fm-spawn.sh's browser grants: --browser clean (the worker's
+# own throwaway browser) and --browser work (a sealed compartment inside the
+# captain's signed-in work browser), plus --chrome (his own Chrome through the
+# extension, the rare exception).
 #
 # A worker's access to the captain's real, signed-in Chrome is a property of how
 # it was launched, not of brief prose it can overlook. Claude Code's own default
@@ -158,9 +159,13 @@ test_browser_grant_wires_session_and_port_into_the_launch() {
     "the launch did not set an explicit port"
   assert_contains "$launch" "disable-component-update" \
     "the launch did not carry the lean-profile Chrome flags"
-  # A clean grant is the tool's isolated throwaway mode: no persistent profile.
+  # A clean grant is the tool's isolated throwaway mode: its own browser, so
+  # neither a persistent profile nor an attachment to the shared work browser.
   case "$launch" in
     *CHROME_DEVTOOLS_AXI_USER_DATA_DIR*) fail "a clean grant pointed at a persistent profile: $launch" ;;
+  esac
+  case "$launch" in
+    *CHROME_DEVTOOLS_AXI_BROWSER_URL*) fail "a clean grant attached to the shared work browser: $launch" ;;
   esac
   # The allocated port must sit above the tool's 9225..10224 hashed range, which
   # is what makes a firstmate worker unable to collide with another lane.
@@ -172,40 +177,43 @@ test_browser_grant_wires_session_and_port_into_the_launch() {
   pass "fm-spawn.sh: a clean grant wires a unique session and an explicit out-of-range port into the launch"
 }
 
-# The fleet grant is the captain's ONE shared signed-in profile. It must point at
-# a persistent directory; Chrome's own lock serialises workers on it.
-test_fleet_grant_points_at_the_shared_profile() {
-  local rec id launch profile
-  id=browser-fleet-b2
-  rec=$(make_case browser-fleet claude "$id")
+# A work grant attaches to the running work browser and carries no profile of its
+# own; the compartment inside that browser is what holds the session.
+test_work_grant_refuses_without_a_work_browser() {
+  local rec id out status
+  id=browser-work-b2
+  rec=$(make_case browser-work claude "$id")
   read_case "$rec"
 
-  run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --browser fleet >/dev/null
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CHROME_DEVTOOLS_AXI_USER_DATA_DIR=" \
-    "the fleet grant did not point at a persistent profile"
-  profile=$(sed -n "s/.*CHROME_DEVTOOLS_AXI_USER_DATA_DIR='\([^']*\)'.*/\1/p" "$LAUNCH_LOG")
-  [ -d "$profile" ] || fail "the fleet profile directory was not created: '$profile'"
-  assert_grep "browser=fleet" "$HOME_DIR/state/$id.meta" "the fleet grant was not recorded"
-  pass "fm-spawn.sh: a fleet grant points every worker at the one shared signed-in profile"
+  # No work browser runs in the test home, so the spawn must refuse rather than
+  # launch a worker whose compartment was never created.
+  status=0
+  out=$(run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --browser work --sites example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a work grant launched with no work browser running: $out"
+  assert_contains "$out" "compartment" "the refusal did not name the missing compartment: $out"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a failed compartment still launched a worker: $(cat "$LAUNCH_LOG")"
+  pass "fm-spawn.sh: a work grant refuses rather than launching a worker with no compartment"
 }
 
-# config/browser-fleet-profile lets several homes share ONE profile, so the
-# captain signs in once rather than once per home.
-test_configured_fleet_profile_is_honoured() {
-  local rec id launch shared
-  id=browser-cfg-b3
-  rec=$(make_case browser-cfg claude "$id")
+# The allowlist IS the worker's blast radius, so it must be chosen per task and
+# is refused where it would mean nothing.
+test_work_grant_requires_an_explicit_site_allowlist() {
+  local rec id out status
+  id=browser-sites-b3
+  rec=$(make_case browser-sites claude "$id")
   read_case "$rec"
-  shared="$CASE_DIR/shared-fleet-profile"
-  mkdir -p "$HOME_DIR/config"
-  printf '%s\n' "$shared" > "$HOME_DIR/config/browser-fleet-profile"
 
-  run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --browser fleet >/dev/null
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CHROME_DEVTOOLS_AXI_USER_DATA_DIR='$shared'" \
-    "the configured shared fleet profile was ignored"
-  pass "fm-spawn.sh: a configured fleet profile path is used, so one sign-in serves every home"
+  status=0
+  out=$(run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --browser work 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a work grant launched with no --sites allowlist: $out"
+  assert_contains "$out" "blast radius" "the refusal did not explain why the allowlist is required: $out"
+
+  status=0
+  out=$(run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --browser clean --sites example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "--sites was accepted on a clean grant that has no logins to scope: $out"
+  pass "fm-spawn.sh: a work grant requires an explicit site allowlist and refuses it elsewhere"
 }
 
 # Two granted workers must never land on the same port.
@@ -286,7 +294,7 @@ test_relaunch_preserves_the_grant_and_its_port() {
   rec=$(make_case browser-relaunch claude "$id")
   read_case "$rec"
 
-  run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --browser fleet >/dev/null
+  run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --browser clean >/dev/null
   meta="$HOME_DIR/state/$id.meta"
   port=$(sed -n 's/^browser_port=//p' "$meta")
   [ -n "$port" ] || fail "no port was recorded to preserve"
@@ -306,8 +314,8 @@ test_grant_is_recorded_and_not_overridable_on_relaunch
 test_ordinary_task_record_keeps_no_chrome_line
 test_non_claude_harness_refuses_the_grant
 test_browser_grant_wires_session_and_port_into_the_launch
-test_fleet_grant_points_at_the_shared_profile
-test_configured_fleet_profile_is_honoured
+test_work_grant_refuses_without_a_work_browser
+test_work_grant_requires_an_explicit_site_allowlist
 test_two_grants_get_distinct_ports
 test_browser_cap_refuses_beyond_the_configured_limit
 test_ungranted_worker_gets_no_browser_environment

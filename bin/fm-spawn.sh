@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|fleet>] [--chrome]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|fleet>] [--chrome]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|work> [--sites <domains>]] [--chrome]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--browser <clean|work> [--sites <domains>]] [--chrome]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -26,29 +26,30 @@
 #   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
 #   using the same private launch-brief overlay. This never rewrites a project's
 #   instruction files or a secondmate's charter.
-#   --browser gives this worker its own browser through chrome-devtools-axi, as
-#   an OPT-IN per task and on any harness. Two grants, both isolated from the
-#   captain's own Chrome:
-#     clean  a throwaway profile carrying no logins. Runs in parallel with other
-#            clean workers, up to the cap below.
-#     fleet  the ONE shared profile the captain signed into once for the work
-#            sites. Chrome's own profile lock serialises workers, refusing a
-#            second one cleanly rather than corrupting the profile; that
-#            serialisation is the accepted price of signed-in access, and
-#            firstmate deliberately adds no lock of its own on top of it.
-#            config/browser-fleet-profile may hold an absolute path so several
-#            homes share one profile and he signs in once, not once per home.
-#   The launch carries a unique session name (the task id) and an explicit port,
-#   because both failures are silent: two workers on one session name share a
-#   browser and read each other's pages, and the tool's default hashed port
+#   --browser gives this worker browser access, OPT-IN per task and on any
+#   harness. Two grants, both isolated from the captain's personal Chrome:
+#     clean            the worker's own throwaway browser. Carries no logins,
+#                      depends on nothing else being up, costs ~0.65GB.
+#     work --sites X,Y a sealed compartment inside the ONE work browser the
+#                      captain signed into once, handed only the cookies for the
+#                      sites named in --sites and genuinely signed out of
+#                      everything else. Isolated, signed in, parallel, and about
+#                      six times cheaper than a browser of its own.
+#                      bin/fm-work-browser.sh owns that browser.
+#   --sites is REQUIRED for a work grant and refused otherwise: that list is the
+#   worker's blast radius, so it is chosen per task rather than defaulted.
+#   Firstmate opens the compartment, because handing over the allowlisted cookies
+#   means reading the WORK browser's shared jar. It never reads the captain's
+#   personal Chrome; he signs the work browser in himself, once.
+#   The launch carries a unique session name (the task id) and an explicit bridge
+#   port, because both failures are silent: two workers on one session name share
+#   a browser and read each other's pages, and the tool's default hashed port
 #   collides across lanes and then kills that worker's name permanently.
-#   Refused above config/browser-worker-cap (default 4, measured ceiling 6) since
-#   each worker costs about 0.65GB and they do not share; that count covers this
-#   home only, which the refusal says rather than implies. Recorded as browser=
-#   and browser_port= so a relaunch keeps the same grant and reattaches to the
-#   same session, and so bin/fm-teardown.sh knows it must stop that browser -
-#   without which roughly 680MB leaks per worker for as long as the machine is
-#   up. bin/fm-browser-lib.sh owns the whole contract and its measured basis.
+#   Refused above config/browser-worker-cap (default 4). Recorded as browser=,
+#   browser_port=, browser_sites=, browser_context= and browser_target= so a
+#   relaunch keeps the same grant and blast radius, and so bin/fm-teardown.sh can
+#   dispose the compartment and stop the session - without which browsers leak
+#   for as long as the machine is up. bin/fm-browser-lib.sh owns the contract.
 #   --chrome grants this worker the captain's real, signed-in Chrome through the
 #   claude-in-chrome extension, by launching the agent with claude's own --chrome
 #   flag. It is OPT-IN per task and claude-only: pass it when the task genuinely
@@ -338,7 +339,7 @@
 # items), on a config/backlog-backend=manual home, and in a home that keeps no
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
 # tasks-axi refuses before creating any lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [chrome=on] [browser=<clean|fleet>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [chrome=on] [browser=<clean|work>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -491,7 +492,11 @@ CHROME_SET=0
 BROWSER=
 BROWSER_SET=0
 BROWSER_PORT=
-BROWSER_PROFILE=
+BROWSER_SITES=
+BROWSER_SITES_SET=0
+BROWSER_URL=
+BROWSER_CONTEXT=
+BROWSER_TARGET=
 RELAUNCH=0
 POS=()
 want_value=
@@ -509,6 +514,7 @@ for a in "$@"; do
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       browser) BROWSER=$a; BROWSER_SET=1 ;;
+      sites) BROWSER_SITES=$a; BROWSER_SITES_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -535,6 +541,8 @@ for a in "$@"; do
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     --browser) want_value=browser ;;
     --browser=*) BROWSER=${a#--browser=}; BROWSER_SET=1 ;;
+    --sites) want_value=sites ;;
+    --sites=*) BROWSER_SITES=${a#--sites=}; BROWSER_SITES_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -547,6 +555,7 @@ done
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$BROWSER_SET" -eq 0 ] || [ -n "$BROWSER" ] || { echo "error: --browser requires a non-empty value" >&2; exit 1; }
+[ "$BROWSER_SITES_SET" -eq 0 ] || [ -n "$BROWSER_SITES" ] || { echo "error: --sites requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -570,7 +579,19 @@ esac
 # profile he signed into once, serialised across workers by Chrome's own profile
 # lock. Absent means no browser at all, which is the default and the cheap case.
 if [ "$BROWSER_SET" -eq 1 ] && ! fm_browser_mode_valid "$BROWSER"; then
-  echo "error: --browser must be clean (throwaway profile, parallel, no logins) or fleet (the captain's one shared signed-in profile, one worker at a time)" >&2
+  echo "error: --browser must be clean (the worker's own throwaway browser, no logins) or work (a sealed compartment inside the captain's signed-in work browser)" >&2
+  exit 1
+fi
+# The allowlist IS the blast radius: a work compartment is handed only the
+# cookies for the sites named here and is genuinely signed out of everything
+# else. Requiring it explicitly is what keeps "only the sites this worker needs"
+# a decision someone made per task rather than a default nobody chose.
+if [ "$BROWSER" = work ] && [ "$BROWSER_SITES_SET" -eq 0 ]; then
+  echo "error: --browser work requires --sites <domain>[,<domain>...] naming only the sites this task needs; that list is the worker's blast radius inside the captain's signed-in browser" >&2
+  exit 1
+fi
+if [ "$BROWSER_SITES_SET" -eq 1 ] && [ "$BROWSER" != work ]; then
+  echo "error: --sites applies only to --browser work; a clean browser carries no logins to scope" >&2
   exit 1
 fi
 # The extension is reserved for the captain's own browser; --browser is the
@@ -592,6 +613,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
   [ "$CHROME_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded browser access; --chrome cannot override it" >&2; exit 1; }
   [ "$BROWSER_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded browser grant; --browser cannot override it" >&2; exit 1; }
+  [ "$BROWSER_SITES_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded site allowlist; --sites cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -1354,6 +1376,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # reattaches to its own session rather than stranding the old browser.
   BROWSER=$(fm_meta_get "$RELAUNCH_META" browser)
   BROWSER_PORT=$(fm_meta_get "$RELAUNCH_META" browser_port)
+  BROWSER_SITES=$(fm_meta_get "$RELAUNCH_META" browser_sites)
+  BROWSER_CONTEXT=$(fm_meta_get "$RELAUNCH_META" browser_context)
+  BROWSER_TARGET=$(fm_meta_get "$RELAUNCH_META" browser_target)
   fm_browser_mode_valid "$BROWSER" || BROWSER=
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
@@ -1744,10 +1769,20 @@ if [ -n "$BROWSER" ]; then
   if [ -z "$BROWSER_PORT" ]; then
     BROWSER_PORT=$(fm_browser_allocate_port "$STATE" "$ID") || exit 1
   fi
-  if [ "$BROWSER" = fleet ]; then
-    BROWSER_PROFILE=$(fm_browser_fleet_profile "$CONFIG" "$DATA") || exit 1
-    mkdir -p "$BROWSER_PROFILE" 2>/dev/null || {
-      echo "error: could not create the shared fleet browser profile at $BROWSER_PROFILE" >&2
+  if [ "$BROWSER" = work ]; then
+    BROWSER_URL=$("$SCRIPT_DIR/fm-work-browser.sh" url) || exit 1
+    # The compartment is opened by firstmate, not by the worker: handing over the
+    # allowlisted cookies means reading the work browser's shared jar, which is
+    # the privileged half of this design and stays on this side of the boundary.
+    # It never reads the captain's personal Chrome.
+    browser_open=$("$SCRIPT_DIR/fm-work-browser.sh" compartment-open "$ID" "$BROWSER_SITES") || {
+      echo "error: could not open a sealed browser compartment for $ID; is the work browser running? (bin/fm-work-browser.sh status)" >&2
+      exit 1
+    }
+    BROWSER_CONTEXT=$(printf '%s\n' "$browser_open" | sed -n 's/^context=//p')
+    BROWSER_TARGET=$(printf '%s\n' "$browser_open" | sed -n 's/^target=//p')
+    [ -n "$BROWSER_CONTEXT" ] && [ -n "$BROWSER_TARGET" ] || {
+      echo "error: the work browser did not return a compartment for $ID" >&2
       exit 1
     }
   fi
@@ -3766,7 +3801,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo chrome browser browser_port tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo chrome browser browser_port browser_sites browser_context browser_target tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3788,6 +3823,11 @@ preserve_relaunch_meta() {
   # knows there is a browser session it must stop.
   [ -z "$BROWSER" ] || echo "browser=$BROWSER"
   [ -z "$BROWSER" ] || echo "browser_port=$BROWSER_PORT"
+  # The compartment identifiers teardown needs to dispose it, and the allowlist
+  # a relaunch must reuse so a replacement worker gets the same blast radius.
+  [ -z "$BROWSER_SITES" ] || echo "browser_sites=$BROWSER_SITES"
+  [ -z "$BROWSER_CONTEXT" ] || echo "browser_context=$BROWSER_CONTEXT"
+  [ -z "$BROWSER_TARGET" ] || echo "browser_target=$BROWSER_TARGET"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -3980,7 +4020,7 @@ if [ -n "$BROWSER" ]; then
     [ -n "$browser_env" ] || continue
     browser_prefix="$browser_prefix${browser_env%%=*}=$(shell_quote "${browser_env#*=}") "
   done <<BROWSERENV
-$(fm_browser_launch_env "$BROWSER" "$ID" "$BROWSER_PORT" "$BROWSER_PROFILE")
+$(fm_browser_launch_env "$BROWSER" "$ID" "$BROWSER_PORT" "$BROWSER_URL")
 BROWSERENV
   LAUNCH="$browser_prefix$LAUNCH"
 fi

@@ -29,7 +29,9 @@
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --browser states which browser grant bin/fm-spawn.sh gives this worker, and
-#   must match the --browser passed there. `clean` is a throwaway profile with
+#   must match the --browser and --sites passed there. --sites names that
+#   worker's site allowlist in the brief, so it can tell a site outside its
+#   grant apart from a work browser that is not signed in. `clean` is a throwaway profile with
 #   no logins; `fleet` is the captain's one shared signed-in profile, which
 #   Chrome's profile lock hands to one worker at a time. It only changes the
 #   Rules' browser paragraph, which then carries the operating rules that
@@ -136,6 +138,7 @@ KIND=ship
 HERDR_LAB=0
 CHROME=0
 BROWSER=
+BROWSER_SITES=
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -149,6 +152,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       browser) BROWSER=$a ;;
+      sites) BROWSER_SITES=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -161,6 +165,8 @@ for a in "$@"; do
     --chrome) CHROME=1 ;;
     --browser) want_value=browser ;;
     --browser=*) BROWSER=${a#--browser=} ;;
+    --sites) want_value=sites ;;
+    --sites=*) BROWSER_SITES=${a#--sites=} ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -194,11 +200,17 @@ fi
 ID=${POS[0]}
 
 case "$BROWSER" in
-  ''|clean|fleet) ;;
-  *) echo "error: --browser must be clean or fleet, matching the --browser passed to bin/fm-spawn.sh" >&2; exit 1 ;;
+  ''|clean|work) ;;
+  *) echo "error: --browser must be clean or work, matching the --browser passed to bin/fm-spawn.sh" >&2; exit 1 ;;
 esac
 if [ -n "$BROWSER" ] && [ "$CHROME" -eq 1 ]; then
   echo "error: --chrome and --browser are different browsers and cannot be combined" >&2
+  exit 1
+fi
+# Naming the sites in the brief lets a worker tell "this site is not in my grant"
+# apart from "the work browser is not signed in", which are different reports.
+if [ -n "$BROWSER_SITES" ] && [ "$BROWSER" != work ]; then
+  echo "error: --sites applies only to --browser work" >&2
   exit 1
 fi
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -356,27 +368,35 @@ if [ -n "$BROWSER" ]; then
   # workers on one session name quietly read each other's pages, and the
   # default hashed port collides across lanes - so the rule here is "do not
   # override", not "remember to set".
-  if [ "$BROWSER" = fleet ]; then
-    BROWSER_WHICH="   You have the captain's SHARED signed-in browser profile, already logged in to his
-   work sites. Only one worker may hold it at a time; Chrome enforces that itself and refuses
-   cleanly. If a command reports the profile is already in use, that is the expected refusal and
-   not a fault: append \`paused: waiting for the shared browser profile\` and stop. Do not retry in
-   a loop, do not point the tool at a different profile, and do not sign in to anything yourself.
+  if [ "$BROWSER" = work ]; then
+    BROWSER_SITE_LINE="the sites this task was given"
+    [ -z "$BROWSER_SITES" ] || BROWSER_SITE_LINE="these sites and no others: $BROWSER_SITES"
+    BROWSER_WHICH="   Your tab is a SEALED COMPARTMENT inside the captain's work browser. It already holds his
+   real logged-in session for $BROWSER_SITE_LINE - you are genuinely
+   signed out of every other site, which is deliberate. Other workers have their own compartments
+   in the same browser and cannot see yours.
    Treat it as the captain's own account: read freely, but anything that sends, buys, posts,
-   deletes, or changes an account setting stops and asks."
+   deletes, or changes an account setting stops and asks. Never sign in or out of anything: a
+   logout would end the session for everyone using that browser.
+   If your site presents as signed out, do NOT try to sign in - append
+   \`blocked: work browser is not signed in to <site>\` and stop."
   else
-    BROWSER_WHICH="   You have your own throwaway browser profile. It carries NO logins, so any page behind a
+    BROWSER_WHICH="   You have your own throwaway browser. It carries NO logins, so any page behind a
    sign-in will show you a signed-out view - that result is meaningless as evidence, and if the
-   task needs a signed-in session, append \`blocked: needs the signed-in browser profile\` and stop
+   task needs a signed-in session, append \`blocked: needs the signed-in work browser\` and stop
    rather than reporting what a logged-out browser showed."
   fi
   BROWSER_RULE="   Drive the browser with \`chrome-devtools-axi\`. Never the \`mcp__claude-in-chrome__*\` tools:
    those drive the captain's own browser and are reserved for him.
 $BROWSER_WHICH
-   Your session name and port are already set in your environment. Never set, change, or unset
-   \`CHROME_DEVTOOLS_AXI_SESSION\`, \`CHROME_DEVTOOLS_AXI_PORT\` or \`CHROME_DEVTOOLS_AXI_USER_DATA_DIR\`,
-   and never run \`chrome-devtools-axi stop\` for any session but your own - other workers are using
-   theirs, and a wrong session name silently mixes your pages up with theirs.
+   Your session name, port and browser are already set in your environment. Never set, change or
+   unset any \`CHROME_DEVTOOLS_AXI_*\` variable, and never run \`chrome-devtools-axi stop\` for any
+   session but your own - other workers are using theirs, and a wrong session name silently mixes
+   your pages up with theirs.
+   Navigate with \`open <url>\`, which moves the tab you are already on. NEVER use \`newpage\`: it
+   opens the new tab OUTSIDE your compartment, in the shared browser, which both breaks your
+   isolation and leaves you with no page selected. If you lose your page, run \`pages\` and
+   \`selectpage\` the one whose title names this task.
    If a command reports an open dialog, the VERY NEXT command must be \`dialog accept\` or
    \`dialog dismiss\`. Any other command in between destroys the page unrecoverably.
    File upload is broken in the current version; do not build the task around it.

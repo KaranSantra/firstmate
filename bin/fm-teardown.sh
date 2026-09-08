@@ -230,7 +230,11 @@
 #     session name and port so a sibling lane's browser is never touched.
 #     Idempotent: stopping a session that was never started is a no-op. Best
 #     effort like Fix 3 - a stop failure never blocks the teardown - but it is
-#     reported so a leak is visible rather than silent.
+#     reported so a leak is visible rather than silent. A `work` grant also holds
+#     a sealed compartment inside the shared work browser; stopping the worker's
+#     own bridge does not dispose that, so the recorded browser_context= is
+#     closed too, or it lingers holding that task's cookies with nothing left to
+#     name it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -3202,6 +3206,14 @@ if [ "$KIND" != secondmate ]; then
   TEARDOWN_BROWSER=$(meta_value "$META" browser)
   if [ -n "$TEARDOWN_BROWSER" ]; then
     fm_browser_stop_session "$ID" "$(meta_value "$META" browser_port)" || true
+    # A work grant also holds a compartment inside the shared work browser.
+    # Stopping the worker's own bridge does not dispose it, so it would sit
+    # there holding this task's cookies with nothing left to identify it.
+    TEARDOWN_BROWSER_CTX=$(meta_value "$META" browser_context)
+    if [ -n "$TEARDOWN_BROWSER_CTX" ]; then
+      "$SCRIPT_DIR/fm-work-browser.sh" compartment-close "$TEARDOWN_BROWSER_CTX" >/dev/null 2>&1 \
+        || echo "browser-cleanup: could not dispose browser compartment $TEARDOWN_BROWSER_CTX for $ID; it may still hold that task's session" >&2
+    fi
   fi
 fi
 

@@ -10,13 +10,14 @@
 # data/fm-browser-cost-scale/report.md and data/fm-chrome-devtools-axi-review/report.md:
 #
 #   none   the default. No browser, no cost.
-#   clean  a throwaway isolated profile. Parallel and unlimited up to the cap;
-#          carries no logins.
-#   fleet  ONE shared profile the captain signed into once for the work sites.
-#          Chrome's own profile lock serialises access across workers, refusing
-#          cleanly rather than corrupting, and that serialisation is the
-#          accepted price of signed-in access. Firstmate deliberately adds no
-#          lock of its own on top of it.
+#   clean  a throwaway isolated browser of the worker's own. Parallel, carries
+#          no logins, and depends on nothing else being up. ~0.65GB.
+#   work   a sealed compartment inside the ONE work browser the captain signed
+#          into once, handed only the cookies for the sites this task named.
+#          Isolated, signed in, parallel, and about six times cheaper than a
+#          browser of its own. bin/fm-work-browser.sh owns that browser and the
+#          compartment operations; this library only wires the result into the
+#          launch and cleans it up.
 #
 # His personal Chrome and the claude-in-chrome extension are reserved for him
 # and are not part of this grant; bin/fm-spawn.sh's --chrome is the separate,
@@ -50,35 +51,20 @@
 FM_BROWSER_PORT_BASE=${FM_BROWSER_PORT_BASE:-11000}
 FM_BROWSER_PORT_LIMIT=${FM_BROWSER_PORT_LIMIT:-11999}
 
-# Measured recommendation: 4 concurrent browser workers routine, 6 the hard
-# ceiling on the captain's machine, at ~0.65GB each with no economy of scale.
-# The cap counts THIS home only, which is stated in the refusal rather than
-# implied, because other lanes' browsers are invisible from here.
+# Measured recommendation: 4 concurrent browser workers routine on the captain's
+# machine, where a `clean` worker is a whole browser at ~0.65GB with no economy
+# of scale. A `work` compartment is far cheaper and five ran concurrently
+# without interference, so a home running only compartments can safely raise
+# config/browser-worker-cap. One cap counts both kinds, because a mixed fleet
+# has no single honest per-worker figure. It counts THIS home only, which the
+# refusal states rather than implies, since other lanes are invisible here.
 FM_BROWSER_DEFAULT_CAP=4
 
 fm_browser_mode_valid() {  # <mode>
   case "${1:-}" in
-    clean|fleet) return 0 ;;
+    clean|work) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-# The one shared signed-in profile. A config/browser-fleet-profile holding an
-# absolute path lets every home on the machine point at the SAME directory, so
-# the captain signs in once rather than once per home.
-fm_browser_fleet_profile() {  # <config-dir> <data-dir>
-  local config=$1 data=$2 configured
-  if [ -f "$config/browser-fleet-profile" ]; then
-    configured=$(head -n 1 "$config/browser-fleet-profile" 2>/dev/null | tr -d '\r')
-    configured=${configured%"${configured##*[![:space:]]}"}
-    configured=${configured#"${configured%%[![:space:]]*}"}
-    case "$configured" in
-      /*) printf '%s\n' "$configured"; return 0 ;;
-      '') ;;
-      *) echo "error: config/browser-fleet-profile must hold an absolute path; got '$configured'" >&2; return 1 ;;
-    esac
-  fi
-  printf '%s\n' "$data/browser-fleet-profile"
 }
 
 # True when something is already listening on the port. Uses bash's own /dev/tcp
@@ -158,16 +144,18 @@ fm_browser_granted_count() {  # <state-dir> [<exclude-task-id>]
 
 # The environment a granted worker is launched with, one `NAME=value` per line.
 # Callers quote and join it for their own launch surface.
-fm_browser_launch_env() {  # <mode> <task-id> <port> <fleet-profile>
-  local mode=$1 id=$2 port=$3 profile=$4
+fm_browser_launch_env() {  # <mode> <task-id> <bridge-port> <work-browser-url>
+  local mode=$1 id=$2 port=$3 browser_url=$4
   printf 'CHROME_DEVTOOLS_AXI_SESSION=%s\n' "$id"
   printf 'CHROME_DEVTOOLS_AXI_PORT=%s\n' "$port"
   # Holds a profile at ~17MB instead of ~87MB, durably, with no loss of
   # function. Disk only - it saves no memory.
   printf 'CHROME_DEVTOOLS_AXI_CHROME_ARGS=%s\n' '--disable-component-update --disable-component-extensions-with-background-pages'
-  # No USER_DATA_DIR is the tool's isolated throwaway mode, which is exactly
-  # what a clean grant wants.
-  [ "$mode" = fleet ] && printf 'CHROME_DEVTOOLS_AXI_USER_DATA_DIR=%s\n' "$profile"
+  # A work grant attaches to the running work browser; the worker then drives
+  # its own compartment's tab inside it. A clean grant sets neither a browser URL
+  # nor a profile, which is the tool's isolated throwaway mode - exactly what a
+  # worker with no logins wants.
+  [ "$mode" = work ] && printf 'CHROME_DEVTOOLS_AXI_BROWSER_URL=%s\n' "$browser_url"
   return 0
 }
 

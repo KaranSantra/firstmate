@@ -230,6 +230,90 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Fleet browser access
+
+Verified 2026-09-08 on Claude Code 2.1.263, chrome-devtools-axi 0.1.34 and Chrome 152.0.7977.82 (macOS).
+
+### Claude Code's Chrome integration is not on by default, and the default is not uniform
+
+`claude --chrome` and `claude --no-chrome` control whether a launched agent has the `mcp__claude-in-chrome__*` tools.
+The bare default is neither fixed nor uniform, which is why `bin/fm-spawn.sh` always emits one direction rather than relying on it.
+Measured by asking a launched agent to count its own tools whose names begin `mcp__claude-in-chrome`:
+
+| Launch | Print mode (`-p`) | Interactive (real tmux pane) |
+|---|---|---|
+| bare | 0 | 22 |
+| `--no-chrome` | 0 | 0 |
+| `--chrome` | 22 | 22 |
+| `--chrome --strict-mcp-config` | 0 | not run |
+
+```sh
+echo 'Reply with exactly: COUNT=<number of tools available to you whose name begins with mcp__claude-in-chrome>. No other text.' | claude -p --chrome
+```
+
+```
+COUNT=22
+```
+
+Interactive mode was measured separately rather than inferred from print mode, because this repo already carries one flag (`--prompt-suggestions`) that works in print mode and not interactively.
+The `--strict-mcp-config` row shows the integration arrives as an ordinary MCP server rather than a built-in, which is also why it is absent from `claude mcp list`.
+
+The interactive default being on is what made this a real gap: a crewmate launched with no flag inherited the captain's extension and competed with his own session for it.
+
+### Sealed compartments carry a signed-in session without carrying the whole profile
+
+A compartment is a Chrome browser context inside the one work browser.
+`bin/fm-work-browser-cdp.mjs` creates it, hands it only the cookies whose domain is on the task's allowlist, and disposes it whole at teardown.
+Measured on a throwaway work browser with two seeded site logins, handing over one:
+
+```
+shared jar : adyen.example, zentact.example
+compartment: zentact.example
+```
+
+A cookie added to the shared jar *after* sealing did not reach the compartment, so a later sign-in cannot widen an existing worker's blast radius:
+
+```
+DEFAULT  jar: defaultonly,sharedlogin
+COMPARTMENT : sharedlogin
+```
+
+`Target.disposeBrowserContext` removed the context and its tab together (4 page targets to 3), and a repeated close is a no-op, so an interrupted teardown can retry.
+
+### The seal holds through the fleet's own tool, and `newpage` breaks it
+
+This is the link the strategy investigation did not test: it proved `chrome-devtools-axi` attaches to the work browser, not that a worker driving a compartment stays inside it.
+With `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointed at the work browser, `selectpage` onto the compartment's tab followed by `open` navigates that tab in place and stays sealed:
+
+```
+--- COMPARTMENT (page 2) ---
+result: "\"sharedlogin=DEFAULT-JAR\""
+--- DEFAULT (page 1) ---
+result: "\"sharedlogin=DEFAULT-JAR; defaultonly=SHARED-ONLY-MUST-NOT-LEAK\""
+```
+
+`newpage` does NOT stay sealed.
+It creates the tab in the browser's default context and leaves the session with no page selected:
+
+```
+93301EB1 ctx=DE0F5FE9 https://example.com/   <- default context
+F685BD2A ctx=DE0F5FE9 https://example.com/   <- newpage landed here
+B9C2A702 ctx=770B9D32 https://example.com/   <- the compartment
+```
+
+That is why the generated brief forbids `newpage` outright and tells a worker to navigate with `open` instead.
+
+### Refreshing this evidence
+
+`bash tests/fm-work-browser-live-e2e.test.sh` drives a real throwaway Chrome and re-checks the compartment properties, the idempotent close, and the refusal of port 9222.
+It spends no model tokens and runs by default wherever Chrome, `node` and `curl` are installed.
+The Claude Code flag matrix above is refreshed by rerunning the two commands in this section after a Claude Code upgrade.
+
+### Not established here
+
+- Cookies are carried into a compartment; `localStorage` is not, so a site keeping its login in the page presents as signed out inside the compartment.
+- No session value was ever read from the captain's personal Chrome (PID 46710, port 9222); it was unchanged before and after, and every browser used here was a throwaway on another port.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
