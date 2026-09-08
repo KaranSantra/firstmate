@@ -897,6 +897,47 @@ test_browser_rule_drives_the_captains_real_chrome() {
   pass "fm-brief.sh: browser work drives the captain's real Chrome and never previews the worker's own output"
 }
 
+# A real AWS account id, the real client repository name, and an SSO ARN carrying the
+# captain's email address reached a test fixture and a verification document, and would
+# have been published the moment that branch was pushed to a public fork. The scaffold is
+# where the rule reaches every worker, so its presence is pinned here for all four kinds.
+test_synthetic_identifiers_rule() {
+  local home brief kind
+  home="$TMP_ROOT/synthetic-identifiers-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "synthetic-$kind" some-proj --scout \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "synthetic-$kind" some-proj --mode "$kind" \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    fi
+    brief="$home/data/synthetic-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+
+    assert_grep 'Never put real identifiers into tests, fixtures, or evidence documents' "$brief" \
+      "$kind brief lost the synthetic-identifier rule"
+    assert_grep 'not even in a file you expect to stay' "$brief" \
+      "$kind brief dropped the reason the rule applies to local-looking files"
+    assert_grep '123456789012' "$brief" \
+      "$kind brief lost the synthetic account-id example"
+    assert_grep 'user@example.com' "$brief" \
+      "$kind brief lost the synthetic email example"
+    assert_grep 'redact in place, keep the surrounding structure' "$brief" \
+      "$kind brief lost the instruction to redact evidence without destroying its shape"
+
+    # The scaffold must also practice the rule: no address outside the reserved example
+    # domains may appear in a generated brief, so the captain's own address cannot creep in.
+    if grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$brief" \
+      | grep -qvE '@example\.(com|org|net|invalid)$'; then
+      fail "$kind brief contains an email address outside the reserved example domains"
+    fi
+  done
+  pass "fm-brief.sh: every worker scaffold forbids real identifiers and supplies synthetic ones"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -943,3 +984,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_browser_rule_drives_the_captains_real_chrome
+test_synthetic_identifiers_rule

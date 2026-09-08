@@ -406,6 +406,13 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put real identifiers into tests, fixtures, or evidence documents: no real account
+   numbers, credentials, API keys, client or customer names, internal hostnames, ARNs, or
+   personal data such as names and email addresses - not even in a file you expect to stay
+   local, because branches get pushed. Use synthetic values that keep the shape and drop the
+   content (\`123456789012\`, \`user@example.com\`, an invented client name). When you paste real
+   output as proof, redact in place, keep the surrounding structure, and say at the top that
+   identifiers were redacted so nobody later mistakes scrubbed evidence for fabricated evidence.
 
 $INBOX_SECTION
 
@@ -502,6 +509,13 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put real identifiers into tests, fixtures, or evidence documents: no real account
+   numbers, credentials, API keys, client or customer names, internal hostnames, ARNs, or
+   personal data such as names and email addresses - not even in a file you expect to stay
+   local, because branches get pushed. Use synthetic values that keep the shape and drop the
+   content (\`123456789012\`, \`user@example.com\`, an invented client name). When you paste real
+   output as proof, redact in place, keep the surrounding structure, and say at the top that
+   identifiers were redacted so nobody later mistakes scrubbed evidence for fabricated evidence.
 
 $INBOX_SECTION
 
