@@ -180,6 +180,44 @@ $ aws codecommit get-pull-request --pull-request-id 27 --region us-east-1 \
 A merge that actually lands was not run against a real repository, because the only CodeCommit pull request available was real unmerged work that had not been authorized for merging.
 The merge command's construction is proven above for the default squash method only; the other two methods, the outcome read that follows the merge, and the refusal when that read cannot prove a merge, are proven by test double in `tests/fm-pr-merge.test.sh`.
 
+## The console's several spellings, normalised to one
+
+Added 2026-09-08.
+The console reaches one pull request by more than one address: its own address bar carries a `/details` segment, and a link shortened by hand drops the `?region=` query.
+Accepting only the canonical spelling refused most real links, including the ones firstmate's own workers report, so each spelling is now accepted and rewritten to the single stored form before any consumer sees it.
+
+```
+$ B='https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests'
+$ . bin/fm-pr-lib.sh
+$ for u in "$B/26?region=us-east-1" "$B/26/details?region=us-east-1" "$B/26/details" "$B/26" "$B/26?region=eu-west-1"; do
+    fm_pr_url_parse "$u" && printf '%s\n  -> %s\n' "$u" "$FM_PR_URL" || printf '%s\n  -> REFUSED\n' "$u"
+  done
+.../pull-requests/26?region=us-east-1
+  -> .../pull-requests/26?region=us-east-1
+.../pull-requests/26/details?region=us-east-1
+  -> .../pull-requests/26?region=us-east-1
+.../pull-requests/26/details
+  -> .../pull-requests/26?region=us-east-1
+.../pull-requests/26
+  -> .../pull-requests/26?region=us-east-1
+.../pull-requests/26?region=eu-west-1
+  -> REFUSED
+```
+
+A query naming a region the host does not is still refused rather than resolved to the host's, and the canonical form re-parses to itself.
+
+Normalising is what makes accepting those spellings safe rather than merely permissive.
+`bin/fm-pr-poll.sh` is byte-static and rebuilds the URL from the stored parts, so a stored `/details` URL would arm a watch that never matches and therefore never reports the merge - silently worse than refusing the link.
+The poll is unchanged by this work, and it still answers on the stored canonical form for the already-merged pull request 26:
+
+```
+$ bin/fm-pr-poll.sh --validated codecommit "$B/26?region=us-east-1" \
+    us-east-1.console.aws.amazon.com Modus-Adyen-Client 26 AWSAdministratorAccess-776781950322
+merged
+```
+
+`tests/fm-pr-check-security.test.sh` carries the regression as "every console spelling of a CodeCommit pull request arms one canonical watch", which arms a separate task from each spelling and drives the real poll to `merged` for each, so a spelling that were accepted without being normalised would fail there rather than in production.
+
 ## Refreshing this record
 
 ```

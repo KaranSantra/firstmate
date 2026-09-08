@@ -261,10 +261,11 @@ fm_pr_codecommit_remote_profile() {  # <remote-url> <expected-repo> <expected-re
 # FM_PR_REGION is additionally set for codecommit, read back out of the console
 # host, because the AWS CLI takes the region as its own argument.
 #
-# The CodeCommit console spells one pull request exactly one way, carrying the
-# region in both the host and a trailing query. Both must be present and must
-# agree, and no other query is accepted: a second spelling of the same pull
-# request would store an identity that no longer reconstructs its own URL.
+# The CodeCommit console spells one pull request several ways, so that parser
+# accepts each of them and stores a single canonical form rather than whichever
+# spelling it was handed. Only the region query is ever accepted, and only when
+# it agrees with the region the host already names; no other query is allowed,
+# because a stored identity must always reconstruct its own URL.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -314,22 +315,36 @@ fm_pr_url_parse() {
 
 # Parse a CodeCommit console pull request URL. Kept apart from the two forge
 # patterns above so its region agreement check reads as one rule.
+#
+# The console reaches one pull request by several spellings, so this parser
+# accepts them all and stores exactly one. The "/details" segment is what the
+# console's own address bar carries, and the region query is dropped whenever a
+# link is shortened by hand; both were refused before, which rejected most real
+# links, including the ones firstmate's own workers report. Accepting a spelling
+# without normalising it would be worse than refusing it: bin/fm-pr-poll.sh is
+# byte-static and rebuilds the URL from the stored parts, so a stored "/details"
+# URL would arm a watch that can never match and therefore never fire. Every
+# accepted spelling is therefore rewritten to the canonical form here, before
+# any consumer sees it, and the canonical form re-parses to itself.
 fm_pr_codecommit_url_parse() {  # <raw-url>
   local raw=${1-} pattern host repo number region query
   local LC_ALL=C
-  pattern='^https://([a-z0-9.-]{1,253})/codesuite/codecommit/repositories/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)\?region=([a-z0-9-]{1,32})$'
+  pattern='^https://([a-z0-9.-]{1,253})/codesuite/codecommit/repositories/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)(/details)?(\?region=([a-z0-9-]{1,32}))?$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   repo=${BASH_REMATCH[2]}
   number=${BASH_REMATCH[3]}
-  query=${BASH_REMATCH[4]}
+  query=${BASH_REMATCH[6]}
   region=${host%.console.aws.amazon.com}
   [ "$host" = "$region.console.aws.amazon.com" ] || return 1
   fm_pr_codecommit_region_valid "$region" || return 1
-  [ "$query" = "$region" ] || return 1
+  # The host names the region, so a query that repeats it must agree and a link
+  # that omits it loses nothing. A query naming another region is still refused
+  # rather than silently resolved to the host's.
+  [ -z "$query" ] || [ "$query" = "$region" ] || return 1
   fm_pr_codecommit_repo_valid "$repo" || return 1
   FM_PR_PROVIDER=codecommit
-  FM_PR_URL=$raw
+  FM_PR_URL="https://$host/codesuite/codecommit/repositories/$repo/pull-requests/$number?region=$region"
   FM_PR_HOST=$host
   FM_PR_PATH=$repo
   FM_PR_NUMBER=$number

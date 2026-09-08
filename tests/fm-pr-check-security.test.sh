@@ -312,8 +312,11 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1"'
   'https://us-east-1.console.aws.amazon.com.evil.net/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1'
   'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=eu-west-1'
-  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1'
   'https://console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1'
+  'https://console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1/details/'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1/detail?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region='
   'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/0?region=us-east-1'
   'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/01?region=us-east-1'
   'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1&extra=1'
@@ -2456,7 +2459,69 @@ test_codecommit_arming_refuses_without_a_profile() {
   pass "arming a CodeCommit watch refuses when the worktree remote names no usable AWS profile"
 }
 
+# The console reaches one pull request by several spellings, and the address bar
+# carries "/details" while a hand-shortened link drops the region query. Arming
+# from each of them must land on one stored identity, because bin/fm-pr-poll.sh
+# rebuilds the URL from the stored parts: a spelling that is accepted but not
+# normalised arms a watch that can never match and so never reports the merge.
+# Every case therefore drives the real poll rather than only the parser.
+test_codecommit_console_url_normalisation() {
+  local dir spelling id rc sidecar_url recorded
+  dir=$(make_case codecommit-url-normalisation)
+  add_codecommit_fixture "$dir"
+  printf 'CLOSED' > "$dir/cc-status"
+  printf 'true' > "$dir/cc-merged"
+
+  id=0
+  while IFS= read -r spelling; do
+    [ -n "$spelling" ] || continue
+    id=$((id + 1))
+    write_task_meta "$dir" "task-$id"
+
+    set +e
+    run_check_entry "$dir" "task-$id" "$spelling" >/dev/null 2>"$dir/stderr-$id"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "codecommit-url-normalisation: arming was refused for $spelling"
+
+    recorded=$(grep '^pr=' "$dir/home/state/task-$id.meta" | tail -1)
+    [ "$recorded" = "pr=$CC_URL" ] \
+      || fail "codecommit-url-normalisation: $spelling recorded '$recorded', not the canonical URL"
+    sidecar_url=$(sed -n '2p' "$dir/home/state/task-$id.pr-poll")
+    [ "$sidecar_url" = "$CC_URL" ] \
+      || fail "codecommit-url-normalisation: $spelling stored sidecar URL '$sidecar_url', not the canonical URL"
+
+    # The merge signal itself, through the sidecar entry path the watcher uses.
+    [ "$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
+        bash "$dir/home/state/task-$id.check.sh")" = merged ] \
+      || fail "codecommit-url-normalisation: a watch armed from $spelling never reported the merge"
+  done <<EOF
+$CC_URL
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27/details?region=$CC_REGION
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27/details
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27
+EOF
+
+  # Normalising the region query must not weaken it: a query naming a region the
+  # host does not is still a contradiction and is refused rather than resolved
+  # to the host's region.
+  write_task_meta "$dir" task-bad
+  set +e
+  run_check_entry "$dir" task-bad \
+    "https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27?region=eu-west-1" \
+    >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "codecommit-url-normalisation: a query naming another region was accepted"
+  assert_absent "$dir/home/state/task-bad.pr-poll" \
+    "codecommit-url-normalisation: a refused contradictory region left a sidecar behind"
+
+  pass "every console spelling of a CodeCommit pull request arms one canonical watch"
+}
+
 test_parser_matrix
+test_codecommit_console_url_normalisation
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
