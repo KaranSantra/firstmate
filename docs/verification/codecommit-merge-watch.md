@@ -2,7 +2,9 @@
 
 Empirical record for the merge watch and the merge path on AWS CodeCommit, alongside the existing GitHub and GitLab ones.
 All evidence here was collected on 2026-09-04.
-Every output is reproduced exactly, with the AWS account id left as it appears because it is already part of the profile name the remote records.
+Identifiers in this record are redacted, not fabricated: every command and every output below was really run and really returned, and only the identifying values inside them were replaced.
+The AWS account id reads `123456789012`, the repository reads `Example-Payments-Client`, the SSO instance id and the operator address in the merge ARN are placeholders, and the squash commit message is a stand-in for the real one.
+Everything else - structure, field names, ordering, argv positions, and the shapes those values take - is reproduced exactly, which is what this record is evidence of.
 
 ## Versions
 
@@ -19,7 +21,7 @@ GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
 
 ## The live subject
 
-Every read below is against `Modus-Adyen-Client` in `us-east-1`, a real repository.
+Every read below is against a real, private repository in `us-east-1`, shown here under the redacted name `Example-Payments-Client`.
 Pull request 27 was open and unmerged throughout, and pull request 26 was already merged before this work began.
 No merge was performed against either during this verification; the one merge attempt was deliberately blocked and is shown below.
 
@@ -31,17 +33,17 @@ Pull request 26 shows the merged shape:
 
 ```
 $ aws codecommit get-pull-request --pull-request-id 26 --region us-east-1 \
-    --profile AWSAdministratorAccess-776781950322 \
+    --profile AWSAdministratorAccess-123456789012 \
   | jq '{status:.pullRequest.pullRequestStatus, targets:[.pullRequest.pullRequestTargets[]|{repositoryName,sourceCommit,mergeMetadata}]}'
 {
   "status": "CLOSED",
   "targets": [
     {
-      "repositoryName": "Modus-Adyen-Client",
+      "repositoryName": "Example-Payments-Client",
       "sourceCommit": "1c0829bc4f2076dc5d08ce409b5b503bcd9eab60",
       "mergeMetadata": {
         "isMerged": true,
-        "mergedBy": "arn:aws:sts::776781950322:assumed-role/AWSReservedSSO_AWSAdministratorAccess_c26186d46988e4fd/Karan@pateam.co",
+        "mergedBy": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AWSAdministratorAccess_0123456789abcdef/user@example.com",
         "mergeCommitId": "17d50b90965a8becffe9b042199547a579a9b1db",
         "mergeOption": "THREE_WAY_MERGE"
       }
@@ -58,9 +60,9 @@ No CodeCommit URL carries the credentials for its account.
 The `git-remote-codecommit` helper records the profile as the userinfo of the remote, which is the only place it is written:
 
 ```
-$ git -C projects/Modus-Adyen-Client remote -v
-origin	codecommit::us-east-1://AWSAdministratorAccess-776781950322@Modus-Adyen-Client (fetch)
-origin	codecommit::us-east-1://AWSAdministratorAccess-776781950322@Modus-Adyen-Client (push)
+$ git -C projects/Example-Payments-Client remote -v
+origin	codecommit::us-east-1://AWSAdministratorAccess-123456789012@Example-Payments-Client (fetch)
+origin	codecommit::us-east-1://AWSAdministratorAccess-123456789012@Example-Payments-Client (push)
 ```
 
 The default credential chain is unauthenticated on this machine, so falling back to it would arm a watch that can only fail.
@@ -73,21 +75,21 @@ A read that succeeds but returns a pull request targeting another repository ref
 The watcher's `--validated` entry point, run against the open pull request 27 and the merged pull request 26, plus three cases that must stay silent:
 
 ```
-$ BASE='https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests'
-$ P=AWSAdministratorAccess-776781950322
+$ BASE='https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests'
+$ P=AWSAdministratorAccess-123456789012
 
 $ bin/fm-pr-poll.sh --validated codecommit "$BASE/27?region=us-east-1" \
-    us-east-1.console.aws.amazon.com Modus-Adyen-Client 27 "$P"
+    us-east-1.console.aws.amazon.com Example-Payments-Client 27 "$P"
 
 $ bin/fm-pr-poll.sh --validated codecommit "$BASE/26?region=us-east-1" \
-    us-east-1.console.aws.amazon.com Modus-Adyen-Client 26 "$P"
+    us-east-1.console.aws.amazon.com Example-Payments-Client 26 "$P"
 merged
 
 $ bin/fm-pr-poll.sh --validated codecommit "$BASE/26?region=us-east-1" \
-    us-east-1.console.aws.amazon.com Modus-Adyen-Client 26 no-such-profile
+    us-east-1.console.aws.amazon.com Example-Payments-Client 26 no-such-profile
 
 $ bin/fm-pr-poll.sh --validated codecommit "$BASE/26?region=us-east-1" \
-    us-east-1.console.aws.amazon.com Modus-Adyen-Client 27 "$P"
+    us-east-1.console.aws.amazon.com Example-Payments-Client 27 "$P"
 
 $ bin/fm-pr-poll.sh --validated github https://github.com/o/r/pull/1 github.com o/r 1 "$P"
 ```
@@ -110,16 +112,16 @@ Arming records the canonical URL and the exact head, and publishes a check that 
 
 ```
 $ grep -E '^pr=|^pr_head=' <state>/task-cc.meta
-pr=https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests/27?region=us-east-1
+pr=https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1
 pr_head=6eb630be7f28c293debcd02391621d75479595ba
 
 $ cat <state>/task-cc.pr-poll
 codecommit
-https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests/27?region=us-east-1
+https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1
 us-east-1.console.aws.amazon.com
-Modus-Adyen-Client
+Example-Payments-Client
 27
-AWSAdministratorAccess-776781950322
+AWSAdministratorAccess-123456789012
 
 $ cmp -s bin/fm-pr-poll.sh <state>/task-cc.check.sh && echo IDENTICAL
 IDENTICAL
@@ -139,20 +141,20 @@ This exercises the whole path, including the merge command's exact construction,
 ```
 $ FM_ROOT_OVERRIDE=$PWD FM_HOME=<sandbox> FM_STATE_OVERRIDE=<state> PATH=<shim>:$PATH \
     bin/fm-pr-merge.sh task-cc \
-    'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests/27?region=us-east-1'
+    'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1'
 armed: state/task-cc.check.sh
-verified: https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests/27?region=us-east-1 is open, approved, and conflict-free at head 6eb630be7f28c293debcd02391621d75479595ba
+verified: https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1 is open, approved, and conflict-free at head 6eb630be7f28c293debcd02391621d75479595ba
 GUARD: refused write operation merge-pull-request-by-squash
 ```
 
 The AWS calls it made, in order:
 
 ```
-codecommit get-pull-request --pull-request-id 27 --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
-codecommit get-pull-request --pull-request-id 27 --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
-codecommit evaluate-pull-request-approval-rules --pull-request-id 27 --revision-id 1c116fa3c931887c16fda82c53f0188559b5ca99f8734ddb85c8e00b2416fee9 --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
-codecommit get-merge-conflicts --repository-name Modus-Adyen-Client --source-commit-specifier 6eb630be7f28c293debcd02391621d75479595ba --destination-commit-specifier refs/heads/main --merge-option SQUASH_MERGE --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
-codecommit merge-pull-request-by-squash --pull-request-id 27 --repository-name Modus-Adyen-Client --source-commit-id 6eb630be7f28c293debcd02391621d75479595ba --commit-message Phase 1 Wave 1: application scaffold + plan 01-01 (domain schema, migrations, seed) --region us-east-1 --profile AWSAdministratorAccess-776781950322 --output json
+codecommit get-pull-request --pull-request-id 27 --region us-east-1 --profile AWSAdministratorAccess-123456789012 --output json
+codecommit get-pull-request --pull-request-id 27 --region us-east-1 --profile AWSAdministratorAccess-123456789012 --output json
+codecommit evaluate-pull-request-approval-rules --pull-request-id 27 --revision-id 1c116fa3c931887c16fda82c53f0188559b5ca99f8734ddb85c8e00b2416fee9 --region us-east-1 --profile AWSAdministratorAccess-123456789012 --output json
+codecommit get-merge-conflicts --repository-name Example-Payments-Client --source-commit-specifier 6eb630be7f28c293debcd02391621d75479595ba --destination-commit-specifier refs/heads/main --merge-option SQUASH_MERGE --region us-east-1 --profile AWSAdministratorAccess-123456789012 --output json
+codecommit merge-pull-request-by-squash --pull-request-id 27 --repository-name Example-Payments-Client --source-commit-id 6eb630be7f28c293debcd02391621d75479595ba --commit-message Example squash message: scaffold + plan 01-01 (schema, migrations, seed) --region us-east-1 --profile AWSAdministratorAccess-123456789012 --output json
 ```
 
 The `merge-pull-request-by-squash` line above predates commit 8e49224 and is left exactly as it was captured.
@@ -167,7 +169,7 @@ The subject was unchanged by the run:
 
 ```
 $ aws codecommit get-pull-request --pull-request-id 27 --region us-east-1 \
-    --profile AWSAdministratorAccess-776781950322 \
+    --profile AWSAdministratorAccess-123456789012 \
   | jq '{status:.pullRequest.pullRequestStatus, isMerged:.pullRequest.pullRequestTargets[0].mergeMetadata.isMerged}'
 {
   "status": "OPEN",
@@ -187,7 +189,7 @@ The console reaches one pull request by more than one address: its own address b
 Accepting only the canonical spelling refused most real links, including the ones firstmate's own workers report, so each spelling is now accepted and rewritten to the single stored form before any consumer sees it.
 
 ```
-$ B='https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests'
+$ B='https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests'
 $ . bin/fm-pr-lib.sh
 $ for u in "$B/26?region=us-east-1" "$B/26/details?region=us-east-1" "$B/26/details" "$B/26" "$B/26?region=eu-west-1"; do
     fm_pr_url_parse "$u" && printf '%s\n  -> %s\n' "$u" "$FM_PR_URL" || printf '%s\n  -> REFUSED\n' "$u"
@@ -212,7 +214,7 @@ The poll is unchanged by this work, and it still answers on the stored canonical
 
 ```
 $ bin/fm-pr-poll.sh --validated codecommit "$B/26?region=us-east-1" \
-    us-east-1.console.aws.amazon.com Modus-Adyen-Client 26 AWSAdministratorAccess-776781950322
+    us-east-1.console.aws.amazon.com Example-Payments-Client 26 AWSAdministratorAccess-123456789012
 merged
 ```
 

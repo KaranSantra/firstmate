@@ -405,17 +405,17 @@ EOF
     [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
       || fail "parser set GitHub owner/repository for a CodeCommit URL"
   done <<'EOF'
-https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Modus-Adyen-Client/pull-requests/27?region=us-east-1|us-east-1.console.aws.amazon.com|Modus-Adyen-Client|27|us-east-1
+https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1|us-east-1.console.aws.amazon.com|Example-Payments-Client|27|us-east-1
 https://eu-west-2.console.aws.amazon.com/codesuite/codecommit/repositories/r/pull-requests/1?region=eu-west-2|eu-west-2.console.aws.amazon.com|r|1|eu-west-2
 https://ap-southeast-3.console.aws.amazon.com/codesuite/codecommit/repositories/repo_name.with-dots/pull-requests/123456?region=ap-southeast-3|ap-southeast-3.console.aws.amazon.com|repo_name.with-dots|123456|ap-southeast-3
 EOF
   # The AWS profile is a credential selector, not identity, so it is validated
   # only in the shape a profile name takes and never inferred from a URL.
   fm_pr_codecommit_remote_profile \
-    'codecommit::us-east-1://AWSAdministratorAccess-776781950322@Modus-Adyen-Client' \
-    Modus-Adyen-Client us-east-1 \
+    'codecommit::us-east-1://AWSAdministratorAccess-123456789012@Example-Payments-Client' \
+    Example-Payments-Client us-east-1 \
     || fail "profile derivation rejected a canonical CodeCommit remote"
-  [ "$FM_PR_CREDENTIAL" = AWSAdministratorAccess-776781950322 ] \
+  [ "$FM_PR_CREDENTIAL" = AWSAdministratorAccess-123456789012 ] \
     || fail "profile derivation returned the wrong AWS profile"
   fm_pr_codecommit_remote_profile 'codecommit://prof@Repo' Repo us-east-1 \
     || fail "profile derivation rejected a region-less CodeCommit remote"
