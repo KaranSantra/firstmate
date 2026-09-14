@@ -3063,6 +3063,7 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_GROUP_PENDING=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3080,6 +3081,8 @@ case "$BACKEND" in
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        HERDR_RECOVERY_CORRELATED=${FM_BACKEND_HERDR_PROJECTION_RECOVERY_CORRELATED:-}
+        HERDR_RECOVERY_JOURNAL_VERSION=${FM_BACKEND_HERDR_JOURNAL_VERSION:-}
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
@@ -3108,80 +3111,38 @@ case "$BACKEND" in
         else
           spawn_herdr_presentation_order_lock_release
         fi
+        if [ "$HERDR_PROJECTED" -ne 1 ] && [ "$HERDR_RECOVERY_CORRELATED" = 0 ]; then
+          case "$HERDR_RECOVERY_JOURNAL_VERSION" in
+            3|4)
+              # No space holds this grouped worker any more - its project
+              # group was closed or Herdr lost it - so the journal protects
+              # nothing. Retire it and group the re-dispatched worker afresh.
+              rm -f "$HERDR_PRESENTATION_JOURNAL" && HERDR_GROUP_PENDING=1
+              ;;
+          esac
+        fi
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-        # Session lock path resolution and exact parent binding both need a
-        # live named-session socket before journal publication.
+        # A fresh worker starts in its launching space like any flat task and
+        # is grouped under its project only once `treehouse get` has created
+        # its worktree; see the grouping step after worktree discovery below.
+        # The floor recheck needs a live named-session server.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
           echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
         elif [ "${FM_BACKEND_HERDR_PRESENTATION_PREFERENCE:-default}" = default ] \
           && ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
           :
-        elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
-          # The projected child is placed and bound UNDER this launcher's exact
-          # parent workspace. Its own herdr pane identity names that workspace
-          # directly; the label lookup is only the fallback for a launcher with
-          # no herdr ancestry at all. A claimed-but-broken identity refuses here
-          # rather than projecting under a guessed parent.
-          set +e
-          fm_backend_herdr_launcher_identity "$HERDR_SES"
-          HERDR_LAUNCHER_STATUS=$?
-          set -e
-          case "$HERDR_LAUNCHER_STATUS" in
-            0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
-            2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
-                 "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
-            *) spawn_herdr_presentation_order_lock_release; exit 1 ;;
-          esac
-          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
-            echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
-            spawn_herdr_presentation_order_lock_release
-          else
-            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
-            if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
-              if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
-                HERDR_PROJECTION_ABORT_CLEANUP=1
-                HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-                HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-              fi
-              exit 1
-            fi
-            HERDR_PROJECTED=1
-            HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-            HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-            HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-            HERDR_PROJECTION_ABORT_CLEANUP=1
-            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-            fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
-            HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
-            if [ -n "$HERDR_HOME_ID" ] \
-               && fm_backend_herdr_projection_live_binding_matches \
-                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
-               && fm_backend_herdr_projection_journal_bind \
-                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
-              :
-            else
-              echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
-            fi
-          fi
         else
-          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
+          HERDR_GROUP_PENDING=1
         fi
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      # A home space Herdr sees at a project's main checkout becomes that
+      # project's group parent, which grouping must refuse, so a worker that
+      # will be grouped never lets its home space be created there.
+      HERDR_CONTAINER_CWD=$PROJ_ABS
+      [ "$HERDR_GROUP_PENDING" != 1 ] || HERDR_CONTAINER_CWD=$HERDR_LABEL_HOME
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$HERDR_CONTAINER_CWD" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -3616,6 +3577,74 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
+
+# A fresh Herdr worker joins its project's group only now: its worktree exists
+# only after `treehouse get` ran inside the staged pane, and Herdr nests a space
+# under a project only when worktree.open opens it for that worktree.
+# fm_backend_herdr_projection_group_task owns the Herdr mechanics and every
+# refusal; this step owns the journal and the endpoint handoff before metadata.
+if [ "${HERDR_GROUP_PENDING:-0}" = 1 ] && [ "$RELAUNCH" -eq 0 ]; then
+  HERDR_GROUP_PENDING=0
+  HERDR_GROUP_WT=$(real_path_or_raw "$WT")
+  HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID")
+  if ! spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+    echo "warning: herdr presentation lock unavailable; leaving this worker in its launching space without project grouping" >&2
+  elif ! fm_backend_herdr_projection_journal_create "$STATE" "$ID" "$HERDR_GROUP_WT" >/dev/null; then
+    spawn_herdr_presentation_order_lock_release
+    echo "warning: herdr presentation journal could not be published; leaving this worker in its launching space without project grouping" >&2
+  else
+    set +e
+    FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_group_task \
+      "$HERDR_SES" "$PROJ_ABS" "$HERDR_GROUP_WT" "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID" \
+      "$HERDR_PROJECTION_LABEL" "$W"
+    HERDR_GROUP_STATUS=$?
+    set -e
+    case "$HERDR_GROUP_STATUS" in
+      0)
+        HERDR_PROJECTED=1
+        HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+        HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+        HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+        T="$HERDR_SES:$HERDR_PANE_ID"
+        WT_TARGET=$T
+        HERDR_PROJECTION_ABORT_CLEANUP=1
+        HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+        HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+        HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+        HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
+        if [ "${FM_BACKEND_HERDR_PROJECTION_EXACT:-0}" = 1 ] && [ -n "$HERDR_HOME_ID" ] \
+           && fm_backend_herdr_projection_group_binding_matches \
+             "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+             "$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID" \
+             "$HERDR_PROJECTION_LABEL" "$W" "$HERDR_GROUP_WT" \
+           && fm_backend_herdr_projection_journal_bind \
+             "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
+             "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+             "$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID" \
+             "$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL" \
+             "$HERDR_PROJECTION_LABEL" "$W"; then
+          :
+        else
+          echo "warning: herdr project grouping could not publish an exact binding for $ID; its journal stays a quarantined attempt" >&2
+        fi
+        spawn_herdr_presentation_order_lock_release
+        ;;
+      2)
+        rm -f "$HERDR_PRESENTATION_JOURNAL"
+        spawn_herdr_presentation_order_lock_release
+        ;;
+      3)
+        echo "warning: herdr project grouping for $ID left its journal quarantined; the worker continues in its launching space" >&2
+        spawn_herdr_presentation_order_lock_release
+        ;;
+      *)
+        spawn_herdr_presentation_order_lock_release
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi

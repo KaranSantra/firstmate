@@ -81,10 +81,16 @@ fm_backend_herdr_projection_focus_snapshot() {
 }
 
 fixture_workspace_json() {
-  local title=$1 tabs=$2 panes=$3 focused=false active=$TAB
+  local title=$1 tabs=$2 panes=$3 focused=false active=$TAB worktree=null
   [ "$(cat "$FIXTURE_DIR/active-tab")" = "$TAB" ] && focused=true
-  printf '{"workspace_id":"%s","label":"%s","focused":%s,"active_tab_id":"%s","tab_count":%s,"pane_count":%s}' \
-    "$WS" "$title" "$focused" "$active" "$tabs" "$panes"
+  [ ! -e "$FIXTURE_DIR/checkout" ] \
+    || worktree=$(fixture_worktree_json "$(cat "$FIXTURE_DIR/checkout")")
+  printf '{"workspace_id":"%s","label":"%s","focused":%s,"active_tab_id":"%s","tab_count":%s,"pane_count":%s,"worktree":%s}' \
+    "$WS" "$title" "$focused" "$active" "$tabs" "$panes" "$worktree"
+}
+
+fixture_worktree_json() { # <checkout-path>
+  printf '{"checkout_path":"%s","is_linked_worktree":true,"repo_key":"/work/proj/.git","repo_name":"proj","repo_root":"/work/proj"}' "$1"
 }
 
 fixture_workspaces() {
@@ -97,6 +103,10 @@ fixture_workspaces() {
   fixture_workspace_json "$title" "$tabs" "$panes"
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
     printf ',{"workspace_id":"w3","label":"└ copy · p:%s","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' "$TOKEN"
+  fi
+  if [ -e "$FIXTURE_DIR/duplicate-checkout" ]; then
+    printf ',{"workspace_id":"w3","label":"copy","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1,"worktree":%s}' \
+      "$(fixture_worktree_json "$(cat "$FIXTURE_DIR/checkout")")"
   fi
   printf ']'
 }
@@ -214,6 +224,28 @@ write_v2() { # <home> <workspace> <tab> <pane>
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
+CHECKOUT=/work/proj-wt-1
+
+write_grouped() { # <version> [workspace-label]
+  local version=$1 label=${2:-$ID} home_real
+  home_real=$(cd "$FM_HOME" && pwd -P)
+  {
+    printf 'version=%s\ntask_id=%s\nprojection_id=%s\n' "$version" "$ID" "$TOKEN"
+    if [ "$version" = 4 ]; then
+      printf 'home=%s\nsession=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$home_real" "$WS" "$TAB" "$PANE"
+      printf 'parent_workspace_id=w9\nparent_label=proj\nworkspace_label=%s\ntask_label=fm-%s\n' "$label" "$ID"
+    fi
+    printf 'checkout_path=%s\n' "$CHECKOUT"
+  } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
+reset_grouped_fixture() { # <version>
+  reset_fixture
+  printf '%s\n' "$ID" > "$FIXTURE_DIR/title"
+  printf '%s\n' "$CHECKOUT" > "$FIXTURE_DIR/checkout"
+  write_grouped "$1"
+}
+
 write_cross_home_v2() {
   mkdir -p "$TMP_ROOT/other-home"
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
@@ -252,6 +284,19 @@ pass "exact stale projection closes one exact pane under task then presentation 
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
+
+for grouped_version in 4 3; do
+  reset_grouped_fixture "$grouped_version"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "grouped version $grouped_version cleanup kept the journal"
+  [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "grouped version $grouped_version cleanup did not close exactly once"
+  pass "a restored grouped child space correlated by its checkout path closes one exact pane (journal version $grouped_version)"
+done
+reset_grouped_fixture 4; printf 'renamed\n' > "$FIXTURE_DIR/title"; assert_preserved "grouped child with a renamed title"
+reset_grouped_fixture 4; printf '/work/other-wt\n' > "$FIXTURE_DIR/checkout"; assert_preserved "grouped child holding a different checkout"
+reset_grouped_fixture 4; : > "$FIXTURE_DIR/duplicate-checkout"; assert_preserved "two spaces holding one checkout"
+reset_grouped_fixture 4; write_grouped 4 "└ task · p:$TOKEN"; assert_preserved "grouped journal carrying the retired title"
+reset_grouped_fixture 4; printf '%s\n' "└ task · p:$TOKEN" > "$FIXTURE_DIR/title"; assert_preserved "retired title over a grouped journal"
 
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"

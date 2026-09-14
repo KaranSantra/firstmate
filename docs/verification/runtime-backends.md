@@ -977,20 +977,21 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 ```
 
-Observed guarantees on 2026-07-30 against Herdr 0.7.5 protocol 17:
+Observed guarantees on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```text
 ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
 ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
-ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
+ok - real herdr E2E: a presentation-enabled worker whose launcher sits at its project's checkout stays in that exact workspace without a journal or focus change
 ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
 ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
-ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
+ok - real herdr E2E: with a duplicated home label, a worker is never grouped under a Firstmate home space; it stays in the launcher's exact workspace and the sibling is untouched
 ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
 ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
 ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
 ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
 ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
 ```
 
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
@@ -1007,64 +1008,52 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
-The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
+The per-project grouping suite ran on 2026-09-14 against Herdr 0.8.2 protocol 20 on macOS aarch64:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-presentation-e2e.test.sh
 ```
 
-Observed guarantees included:
+Observed guarantees:
 
 ```text
-ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
-ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
-ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
-ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
-ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
-ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
+ok - real Herdr lab: an opted-out spawn stays flat in its launching space with zero grouping calls
+ok - real Herdr lab: a home that configured nothing is grouped under its project by default on herdr 0.8.2
+ok - real Herdr lab: a fresh worker is grouped as a plain-labeled linked child under one project parent with an exact version 4 binding and no focus drift
+ok - real Herdr lab: Treehouse commands and metadata shape are identical to the flat path except for endpoint IDs and spawn incarnation
+ok - real Herdr lab: a second worker on the same project reuses the one project parent
+ok - real Herdr lab: concurrent workers on one project end under exactly one parent without focus drift
+ok - real Herdr lab: bounded lock contention warns and stays flat without a journal, grouping calls, or focus drift
+ok - real Herdr lab: exact task-pane teardown removes only the child space, retires its journal, and leaves the project parent
+ok - real Herdr lab: concurrent grouped teardowns are serialized and leave the parent and active workspace/tab unchanged
+ok - real Herdr lab: a secondmate agent stays in its home workspace ungrouped, and the presentation setting inherits into secondmate homes
+ok - real Herdr lab: primary and secondmate homes each group their workers under that project's one parent with home-local journals
+ok - real Herdr lab: a launcher sitting at the project's own checkout is refused grouping and its worker stays flat with no residue
+ok - real Herdr lab: multi-home exact-pane teardowns keep parents and home spaces without workspace close authority
+ok - real Herdr lab: legacy presentation labels and flat secondmate tabs are left unmigrated
+ok - real Herdr lab: a re-dispatch whose project group was closed retires the stale binding and groups the new worker afresh
+ok - real Herdr lab: after a session restart a grouped worker is never reclaimed in place and its re-dispatch falls back flat
+ok - real Herdr lab: missing, renamed, and duplicate legacy titles trigger zero mutation calls, and live duplicate risk refuses launch
+ok - real Herdr lab: grouped journals correlate only by worktree membership, with zero mutation calls, and a live agent there refuses launch
+ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
 ```
 
-The suite also covers lost or failed move responses, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
+In-place reclaim of a retired version 2 binding is no longer exercised by that suite, because no production path writes one; `tests/fm-backend-herdr.test.sh` pins it with hand-written records.
 
-The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
+The Herdr behavior that grouping relies on was observed in guarded `fm-lab-` sessions on 2026-09-14 against Herdr 0.8.2 protocol 20, with every call made as `bin/fm-herdr-lab.sh run <lab-session> <arguments>`:
 
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
+- `workspace create --cwd <linked-worktree>` reported `"worktree":null` in `workspace list`, so a space created that way stays a top-level row.
+- `worktree open --cwd <main-checkout> --path <linked-worktree> --label <task> --no-focus` returned `"already_open":false` with `"is_linked_worktree":true` for the child, created a parent reporting `"is_linked_worktree":false` labeled with the repository name when none was open, and reused the one parent for later worktrees of the same repository, including a parent that had been renamed.
+- A space created with `workspace create --cwd <main-checkout>` became that project's parent the first time a worktree of the repository was opened.
+- Opening an already-open path returned `"already_open":true` and relabeled that existing space.
+- `worktree open --cwd <linked-worktree>` failed with `linked_worktree_source`, and `worktree open --workspace <non-git-space>` failed with `not_git_worktree`.
+- `pane move <pane> --new-tab --workspace <child> --label fm-<id> --no-focus` returned a new pane id with `previous_pane_id` naming the moved pane, and a background process started in that pane before the move was still running afterward.
+- Neither `worktree open --no-focus` nor `pane move --no-focus` changed the focused workspace or its active tab.
+- `workspace close <parent>` removed every space in that repository's group and ended the processes in their panes, while another repository's group, every worktree directory, and every branch remained.
+- Closing a child space, by `workspace close <child>` or by closing its only pane, removed only that child.
 
-Observed restart-reclaim guarantees:
-
-```text
-ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
-ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
-ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
-```
-
-The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enables the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-Observed default and opt-out guarantees:
-
-```text
-ok - real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls
-ok - real Herdr lab: a home that configured nothing is projected by default
-ok - real Herdr lab: the primary presentation setting inherits into real secondmate homes
-ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
-```
-
-The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
-That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
-
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+The restored-shell session-start cleanup ran on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
