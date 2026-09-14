@@ -24,7 +24,7 @@
 # name, still requires every other check green, and still binds the head. It is
 # refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# succeeded, or on CodeCommit, which accepts no extra merge argument. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -92,7 +92,7 @@
 # The AWS profile is read from the task worktree's own git remote by
 # bin/fm-pr-check.sh, which this script runs before any forge call.
 #
-# Before either forge merge, the task's existing per-task control lock
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
@@ -204,6 +204,10 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = codecommit ]; then
+  echo "error: --allow-red does not apply to CodeCommit, which accepts no extra merge argument" >&2
   exit 2
 fi
 
@@ -1500,11 +1504,28 @@ case "$PROVIDER" in
     if [ "$CODECOMMIT_MERGE_API" != merge-pull-request-by-fast-forward ]; then
       codecommit_merge_args=(--commit-message="$FM_PR_CC_TITLE")
     fi
+    # The away record is locked first, so this last presence and authority read
+    # and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    merge_status=0
     codecommit_aws "$CODECOMMIT_MERGE_API" \
       --pull-request-id "$PR_NUMBER" \
       --repository-name "$PR_REPO_NAME" \
       --source-commit-id "$FM_PR_MERGE_HEAD" \
-      "${codecommit_merge_args[@]+"${codecommit_merge_args[@]}"}" >/dev/null
+      "${codecommit_merge_args[@]+"${codecommit_merge_args[@]}"}" >/dev/null || merge_status=$?
+    if [ "$merge_status" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      exit "$merge_status"
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
     codecommit_confirm_rc=0
     codecommit_confirm_merged || codecommit_confirm_rc=$?
     if [ "$codecommit_confirm_rc" -eq 2 ]; then

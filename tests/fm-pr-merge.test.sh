@@ -2255,6 +2255,54 @@ make_codecommit_case() {
   printf '%s\n' "$case_dir"
 }
 
+# CodeCommit merges under the same away-posture authority as GitHub and GitLab:
+# held without yolo or a grant, and a granted merge persists the authority it ran
+# under so a poll that later observes the merge can attribute it. --allow-red is
+# parsed before the CodeCommit extra-argument refusal, so it is refused by name.
+test_codecommit_away_authority_and_allow_red() {
+  local case_dir rc record
+
+  case_dir=$(make_codecommit_case codecommit-away-held)
+  write_away_record "$case_dir"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "codecommit-away-held: an ungranted merge must refuse while away"
+  assert_grep 'task task-x1 is held for the captain return' "$case_dir/stderr" \
+    "codecommit-away-held: the refusal did not name hold-for-return"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-away-held: a CodeCommit merge ran without a grant"
+
+  case_dir=$(make_codecommit_case codecommit-away-grant)
+  mkdir -p "$case_dir/home"
+  write_away_record "$case_dir" --grant task-x1
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "codecommit-away-grant: a granted mergeable CodeCommit PR should merge: $(cat "$case_dir/stderr")"
+  [ -n "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-away-grant: the granted merge never reached CodeCommit"
+  assert_grep "merge landed: task-x1 $CC_URL away-grant" "$case_dir/state/.wake-queue" \
+    "codecommit-away-grant: the durable outcome did not tag away-grant"
+  record="$case_dir/state/task-x1.merge-authority"
+  [ -f "$record" ] || fail "codecommit-away-grant: the accepted merge authority was not persisted"
+  [ "$(sed -n 2p "$record")" = codecommit ] && [ "$(sed -n 6p "$record")" = away-grant ] \
+    || fail "codecommit-away-grant: the persisted authority does not name codecommit and away-grant"
+
+  case_dir=$(make_codecommit_case codecommit-allow-red)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" --allow-red build \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "codecommit-allow-red: --allow-red must be refused on CodeCommit"
+  assert_grep 'does not apply to CodeCommit' "$case_dir/stderr" \
+    "codecommit-allow-red: the refusal did not name CodeCommit"
+  [ ! -s "$case_dir/aws.log" ] \
+    || fail "codecommit-allow-red: CodeCommit was called for a refused request"
+  pass "a CodeCommit merge honours away authority, persists it, and refuses --allow-red"
+}
+
 # The merge line aws was asked to run, so a test asserts one exact invocation
 # rather than a substring of the whole log. The conflict read is asserted the
 # same way, because the merge API and the merge option it is judged under are
@@ -3526,6 +3574,7 @@ test_codecommit_foreign_extra_args_refuse_before_recording
 test_codecommit_missing_profile_refuses_before_recording
 test_codecommit_foreign_repo_remote_refuses
 test_codecommit_missing_tool_refuses_before_recording
+test_codecommit_away_authority_and_allow_red
 test_absent_backlog_still_merges
 test_unreadable_backlog_refuses_the_merge
 test_unreadable_backend_config_refuses_the_merge
