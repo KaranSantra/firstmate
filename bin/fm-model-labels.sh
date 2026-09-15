@@ -9,32 +9,40 @@
 # from state/<task-id>.meta's harness=, model=, and effort= fields, for example
 # "claude · opus5 · hi". A model matches the lookup by its exact
 # [models."<recorded model>"] key or by any value in that entry's
-# also_recorded_as list. An unknown model prints its raw recorded name, and an
-# effort level with no alias prints its raw value. A model or effort segment
-# whose field is absent, empty, "-", or "default" is omitted. A missing lookup
-# file silently falls back to raw names; an invalid one also falls back and adds
-# one warning on stderr. Exit 0 with the label, or 1 when the task has no
-# readable record or records no harness.
+# also_recorded_as list. A model or effort word with no alias prints its raw
+# recorded name - never an error. A model or effort segment whose field is
+# absent, empty, "-", or "default" is omitted. A missing lookup file silently
+# falls back to raw names; an invalid one also falls back and adds one warning
+# on stderr. Exit 0 with the label, or 1 when the task has no readable record or
+# records no harness.
 #
 # check validates the lookup file. It prints one "warning:" line per unknown
-# key or effort level, one "error:" line per defect, and a closing summary.
-# Unknown keys are warnings, never failures. Exit 0 for a valid file (with or
-# without warnings), 1 for an absent or invalid file.
+# key, one "error:" line per defect, and a closing summary. Unknown keys are
+# warnings, never failures. When the generated catalog
+# <data>/model-effort-catalog.md exists, check also prints one "info:" line per
+# catalog model with no alias; that report never changes the result. Exit 0 for
+# a valid file (with or without warnings), 1 for an absent or invalid file.
 #
-# The lookup is DISPLAY ONLY: no dispatch step reads it, so it never decides
-# which harness, model, or effort a worker gets (AGENTS.md section 4). Update it
-# only when the captain asks. bin/fm-spawn.sh applies the label to a
-# Herdr-backed worker after launch and after relaunch through
-# bin/backends/herdr.sh's fm_backend_herdr_report_display_agent.
+# The lookup holds ONLY short display aliases for model names and effort words.
+# The generated catalog (data/model-effort-catalog.md, rebuilt by
+# data/model-catalog/refresh.sh) is the single owner of which models exist and
+# which effort levels each accepts, so nothing here validates or restricts an
+# effort level, and check only reads that catalog's model rows for its info
+# report. No dispatch step reads the lookup, so it never decides which harness,
+# model, or effort a worker gets (AGENTS.md section 4). Update it only when the
+# captain asks. bin/fm-spawn.sh applies the label to a Herdr-backed worker after
+# launch and after relaunch through bin/backends/herdr.sh's
+# fm_backend_herdr_report_display_agent.
 #
 # Paths: the lookup file is FM_MODEL_LABELS_FILE when set, otherwise
 # <config>/model-labels.toml, where <config> is FM_CONFIG_OVERRIDE or
-# $FM_HOME/config. Task records come from FM_STATE_OVERRIDE or $FM_HOME/state.
-# python3 reads the file; without python3, label falls back to raw names with
-# one warning and check fails.
+# $FM_HOME/config. Task records come from FM_STATE_OVERRIDE or $FM_HOME/state,
+# and the catalog from FM_DATA_OVERRIDE or $FM_HOME/data. python3 reads the
+# lookup; without python3, label falls back to raw names with one warning and
+# check fails.
 #
-# Accepted syntax is this TOML subset, parsed without a TOML library so any
-# python3 works:
+# Accepted lookup syntax is this TOML subset, parsed without a TOML library so
+# any python3 works:
 #   - blank lines and # comments, including trailing comments
 #   - [table] headers whose dotted keys are bare or "quoted"
 #   - key = value, where value is a "basic string" (only \" and \\ escapes),
@@ -43,13 +51,14 @@
 #
 # Schema (schema = 1):
 #   [meta]                       schema (integer), updated (string)
-#   [models."<recorded model>"]  provider (string, required), alias (string,
-#                                required), also_recorded_as (string array),
-#                                verified (string), note (string)
-#   [effort.aliases]             <level> = "<short alias>"
-#   [effort.accepted]            <harness> = [<levels>]  (informational only)
-# Known effort levels are low, medium, high, xhigh, max, and ultra.
+#   [models."<recorded model>"]  alias (string, required), also_recorded_as
+#                                (string array), provider, verified, note
+#                                (strings)
+#   [effort.aliases]             <effort word> = "<short alias>"
 # A recorded model name claimed by more than one [models] entry is an error.
+#
+# The catalog info report reads only table rows whose first cell is a single
+# `model` and list lines that are a single `model`.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,7 +67,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LABELS_FILE="${FM_MODEL_LABELS_FILE:-$CONFIG/model-labels.toml}"
+CATALOG_FILE="$DATA/model-effort-catalog.md"
 SEP=' · '
 
 usage() {
@@ -70,18 +81,19 @@ die() {
   exit "${2:-1}"
 }
 
-# model_labels_py <mode> <file> [<model> <effort>]: the one parser and schema
-# validator. mode=aliases prints the model alias line then the effort alias line;
-# mode=check prints the validation report.
+# model_labels_py <mode> <file> ...: the one lookup parser and schema validator.
+# mode=aliases <model> <effort> prints the model alias line then the effort
+# alias line; mode=check <catalog> prints the validation report.
 model_labels_py() {
   python3 - "$@" <<'PY'
 import os
 import re
 import sys
 
-KNOWN_EFFORT = ("low", "medium", "high", "xhigh", "max", "ultra")
 BARE = re.compile(r"[A-Za-z0-9_-]+")
 SCALAR = re.compile(r"[+-]?[0-9]+|true|false")
+CATALOG_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
+CATALOG_ITEM = re.compile(r"^-\s+`([^`]+)`\s*$")
 
 
 class ParseError(Exception):
@@ -182,7 +194,7 @@ def descend(node, parts, n):
 
 
 def parse(text):
-    root, defined, current = {}, set(), None
+    root, defined = {}, set()
     current = root
     for n, line in enumerate(text.splitlines(), 1):
         i = skip_ws(line, 0)
@@ -249,7 +261,7 @@ def validate(doc):
             errors.append("%s must be a table" % where)
             continue
         for key, v in entry.items():
-            if key in ("provider", "alias", "verified", "note"):
+            if key in ("alias", "provider", "verified", "note"):
                 if not nonempty_string(v):
                     errors.append("%s.%s must be a non-empty string" % (where, key))
             elif key == "also_recorded_as":
@@ -257,9 +269,8 @@ def validate(doc):
                     errors.append("%s.also_recorded_as must be an array of non-empty strings" % where)
             else:
                 warnings.append("unknown key %s.%s" % (where, key))
-        for key in ("provider", "alias"):
-            if key not in entry:
-                errors.append("%s is missing %s" % (where, key))
+        if "alias" not in entry:
+            errors.append("%s is missing alias" % where)
         names = [name]
         if isinstance(entry.get("also_recorded_as"), list):
             names += entry["also_recorded_as"]
@@ -272,28 +283,15 @@ def validate(doc):
         errors.append("effort must be a table")
         effort = {}
     for key, v in effort.items():
-        if key == "aliases":
-            if not isinstance(v, dict):
-                errors.append("effort.aliases must be a table")
-                continue
-            for level, alias in v.items():
-                if level not in KNOWN_EFFORT:
-                    warnings.append("unknown effort level effort.aliases.%s" % level)
-                if not nonempty_string(alias):
-                    errors.append("effort.aliases.%s must be a non-empty string" % level)
-        elif key == "accepted":
-            if not isinstance(v, dict):
-                errors.append("effort.accepted must be a table")
-                continue
-            for harness, levels in v.items():
-                if not isinstance(levels, list):
-                    errors.append("effort.accepted.%s must be an array of effort levels" % harness)
-                    continue
-                for level in levels:
-                    if level not in KNOWN_EFFORT:
-                        warnings.append('unknown effort level "%s" in effort.accepted.%s' % (level, harness))
-        else:
+        if key != "aliases":
             warnings.append("unknown key effort.%s" % key)
+            continue
+        if not isinstance(v, dict):
+            errors.append("effort.aliases must be a table")
+            continue
+        for word, alias in v.items():
+            if not nonempty_string(alias):
+                errors.append("effort.aliases.%s must be a non-empty string" % word)
     return errors, warnings
 
 
@@ -302,6 +300,28 @@ def load(path):
         doc = parse(f.read())
     errors, warnings = validate(doc)
     return doc, errors, warnings
+
+
+def recorded_names(doc):
+    names = set()
+    for name, entry in doc.get("models", {}).items():
+        names.add(name)
+        if isinstance(entry, dict) and isinstance(entry.get("also_recorded_as"), list):
+            names.update(entry["also_recorded_as"])
+    return names
+
+
+def catalog_models(path):
+    found = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = CATALOG_ROW.match(line) or CATALOG_ITEM.match(line)
+                if m and m.group(1) not in found:
+                    found.append(m.group(1))
+    except (OSError, UnicodeDecodeError):
+        return None
+    return found
 
 
 def model_alias(doc, model):
@@ -315,26 +335,39 @@ def model_alias(doc, model):
     return model
 
 
+def check(path, catalog):
+    if not os.path.isfile(path):
+        print("error: no lookup file at %s" % path)
+        return 1
+    try:
+        doc, errors, warnings = load(path)
+    except (OSError, UnicodeDecodeError, ParseError) as exc:
+        print("error: %s" % exc)
+        return 1
+    for w in warnings:
+        print("warning: %s" % w)
+    for e in errors:
+        print("error: %s" % e)
+    if errors:
+        print("invalid: %s has %d error(s); labels fall back to raw names until it is fixed" % (path, len(errors)))
+        return 1
+    if os.path.isfile(catalog):
+        models = catalog_models(catalog)
+        if models is None:
+            print("info: %s could not be read for the alias report" % catalog)
+        else:
+            known = recorded_names(doc)
+            for model in models:
+                if model not in known:
+                    print("info: catalog model %s has no alias and shows its raw name" % model)
+    print("ok: %s is valid (%d warning(s))" % (path, len(warnings)))
+    return 0
+
+
 def main():
     mode, path = sys.argv[1], sys.argv[2]
     if mode == "check":
-        if not os.path.isfile(path):
-            print("error: no lookup file at %s" % path)
-            return 1
-        try:
-            _, errors, warnings = load(path)
-        except (OSError, UnicodeDecodeError, ParseError) as exc:
-            print("error: %s" % exc)
-            return 1
-        for w in warnings:
-            print("warning: %s" % w)
-        for e in errors:
-            print("error: %s" % e)
-        if errors:
-            print("invalid: %s has %d error(s); labels fall back to raw names until it is fixed" % (path, len(errors)))
-            return 1
-        print("ok: %s is valid (%d warning(s))" % (path, len(warnings)))
-        return 0
+        return check(path, sys.argv[3])
     model, effort = sys.argv[3], sys.argv[4]
     doc = {}
     if os.path.isfile(path):
@@ -393,7 +426,7 @@ cmd_label() {
 
 cmd_check() {
   command -v python3 >/dev/null 2>&1 || die "python3 is required to check $LABELS_FILE"
-  model_labels_py check "$LABELS_FILE"
+  model_labels_py check "$LABELS_FILE" "$CATALOG_FILE"
 }
 
 case "${1:-}" in

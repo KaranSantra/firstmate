@@ -3008,6 +3008,17 @@ fm_backend_herdr_report_display_agent() {  # <session> <pane_id> <label>
     --source firstmate-model-label --display-agent "$3"
 }
 
+# fm_backend_herdr_report_worker_mark: tag <workspace_id> with the display-only
+# worker marker token wt, under the firstmate-worker-mark metadata source.
+# Callers pass only a worker's own child space, never a project parent space or
+# firstmate's own space. The workspace id precedes the options for the same
+# Herdr 0.8.2 reason as the pane call above. Callers treat a failure as cosmetic.
+fm_backend_herdr_report_worker_mark() {  # <session> <workspace_id>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  fm_backend_herdr_cli "$1" workspace report-metadata "$2" \
+    --source firstmate-worker-mark --token 'wt=●'
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.

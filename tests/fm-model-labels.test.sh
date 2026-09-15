@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-model-labels.sh label rendering and lookup checks,
-# plus the argument order of bin/backends/herdr.sh's sidebar-label call, driven
-# through a logging fake herdr so no live Herdr is touched.
+# plus the argument order of bin/backends/herdr.sh's sidebar-label and
+# worker-space-marker calls, driven through a logging fake herdr so no live
+# Herdr is touched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -9,7 +10,7 @@ set -u
 
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (reads the lookup file)"; exit 0; }
 
-unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_MODEL_LABELS_FILE FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_SESSION
+unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_MODEL_LABELS_FILE FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_SESSION
 unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
 
 TMP_ROOT=$(fm_test_tmproot fm-model-labels)
@@ -18,7 +19,7 @@ STATE_DIR="$HOME_DIR/state"
 LABELS="$HOME_DIR/config/model-labels.toml"
 SCRIPT="$ROOT/bin/fm-model-labels.sh"
 ERR="$TMP_ROOT/stderr"
-mkdir -p "$STATE_DIR" "$HOME_DIR/config"
+mkdir -p "$STATE_DIR" "$HOME_DIR/config" "$HOME_DIR/data"
 
 cat > "$LABELS" <<'TOML'
 # Synthetic lookup for these tests.
@@ -33,7 +34,6 @@ also_recorded_as = ["opus"]   # the short name a harness records
 verified = "2026-01-01"
 
 [models."gpt-5.6-terra"]
-provider = "openai"
 alias = "terra5.6"
 note = "example entry"
 
@@ -43,10 +43,6 @@ medium = "med"
 high = "hi"
 xhigh = "xhi"
 max = "max"
-
-[effort.accepted]
-claude = ["low", "medium", "high", "xhigh", "max"]
-cursor = []
 TOML
 
 label() {  # <task-id> [env assignments...] -> label on stdout, stderr in $ERR
@@ -71,11 +67,11 @@ out=$(label also) || fail "also_recorded_as: label exited non-zero"
 assert_equals 'claude · opus5 · xhi' "$out" "an also_recorded_as name renders the entry's alias"
 pass "label: also_recorded_as match"
 
-fm_write_meta "$STATE_DIR/unknown.meta" harness=codex model=gpt-9-example effort=turbo
+fm_write_meta "$STATE_DIR/unknown.meta" harness=codex model=gpt-9-example effort=ultra
 out=$(label unknown) || fail "unknown model: label exited non-zero"
-assert_equals 'codex · gpt-9-example · turbo' "$out" "an unknown model and effort print their raw names"
-assert_equals '' "$(cat "$ERR")" "an unknown model is not a warning"
-pass "label: unknown model falls back to its raw name"
+assert_equals 'codex · gpt-9-example · ultra' "$out" "a model and effort word with no alias print their raw names"
+assert_equals '' "$(cat "$ERR")" "a missing alias is not a warning"
+pass "label: missing aliases fall back to raw names"
 
 fm_write_meta "$STATE_DIR/no-effort.meta" harness=codex model=gpt-5.6-terra
 out=$(label no-effort) || fail "missing effort: label exited non-zero"
@@ -106,16 +102,43 @@ pass "label: missing record and unsafe id are refused"
 
 out=$(check_file "$LABELS") || fail "check: a valid lookup exited non-zero"$'\n'"$out"
 assert_contains "$out" 'ok:' "check reports a valid lookup"
+assert_not_contains "$out" 'warning:' "a valid aliases-only lookup has no warnings"
 pass "check: valid lookup"
 
+cp "$LABELS" "$TMP_ROOT/effort-words.toml"
+printf 'ultra = "ult"\nturbo = "tb"\n' >> "$TMP_ROOT/effort-words.toml"
+printf '\n[effort.accepted]\nclaude = ["low"]\n' >> "$TMP_ROOT/effort-words.toml"
+out=$(check_file "$TMP_ROOT/effort-words.toml") || fail "check: effort words must never fail"$'\n'"$out"
+assert_not_contains "$out" 'effort level' "check never validates an effort word"
+assert_contains "$out" 'warning: unknown key effort.accepted' "a leftover accepted-levels block is only an unknown key"
+pass "check: effort words are aliases only, never validated"
+
 cp "$LABELS" "$TMP_ROOT/extra-key.toml"
-printf '\n[models."example-model"]\nprovider = "example"\nalias = "ex1"\ncolour = "blue"\n' >> "$TMP_ROOT/extra-key.toml"
+printf '\n[models."example-model"]\nalias = "ex1"\ncolour = "blue"\n' >> "$TMP_ROOT/extra-key.toml"
 out=$(check_file "$TMP_ROOT/extra-key.toml") || fail "check: an unknown key must not fail"$'\n'"$out"
 assert_contains "$out" 'warning: unknown key models."example-model".colour' "check names the unknown key"
 pass "check: unknown keys warn without failing"
 
+cat > "$HOME_DIR/data/model-effort-catalog.md" <<'MD'
+# Synthetic catalog
+| Model | Effort levels it accepts |
+|---|---|
+| `gpt-5.6-terra` | low · medium |
+| `gpt-9-example` | low · ultra |
+- `claude-opus-5`
+- `claude-example-9`
+Prose that mentions `not-a-model` stays out of the report.
+MD
+out=$(check_file "$LABELS") || fail "check: the catalog report must not fail"$'\n'"$out"
+assert_contains "$out" 'info: catalog model gpt-9-example has no alias' "check reports an unaliased catalog table row"
+assert_contains "$out" 'info: catalog model claude-example-9 has no alias' "check reports an unaliased catalog list item"
+assert_not_contains "$out" 'catalog model gpt-5.6-terra' "an aliased catalog model is not reported"
+assert_not_contains "$out" 'not-a-model' "catalog prose is not read as a model"
+rm "$HOME_DIR/data/model-effort-catalog.md"
+pass "check: catalog models without an alias are information only"
+
 cp "$LABELS" "$TMP_ROOT/duplicate.toml"
-printf '\n[models."claude-opus-4"]\nprovider = "anthropic"\nalias = "opus4"\nalso_recorded_as = ["opus"]\n' >> "$TMP_ROOT/duplicate.toml"
+printf '\n[models."claude-opus-4"]\nalias = "opus4"\nalso_recorded_as = ["opus"]\n' >> "$TMP_ROOT/duplicate.toml"
 rc=0
 out=$(check_file "$TMP_ROOT/duplicate.toml") || rc=$?
 expect_code 1 "$rc" "check with a recorded name claimed twice"
@@ -129,7 +152,7 @@ check_file "$TMP_ROOT/absent.toml" >/dev/null || rc=$?
 expect_code 1 "$rc" "check with no lookup file"
 pass "check: invalid or absent lookup fails"
 
-# --- Herdr sidebar-label call --------------------------------------------------
+# --- Herdr sidebar-label and worker-space-marker calls -------------------------
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 HERDR_LOG="$TMP_ROOT/herdr.log"
@@ -143,29 +166,45 @@ exit "${FM_FAKE_HERDR_EXIT:-0}"
 SH
 chmod +x "$FAKEBIN/herdr"
 
-report() {  # <session> <pane-id> <label> [env assignments...]
-  local session=$1 pane=$2 text=$3
-  shift 3
+herdr_backend() {  # <function> <args...> [-- env assignments...] via the logging fake
+  local -a args=() envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do args+=("$1"); shift; done
+  [ "$#" -eq 0 ] || { shift; envs=("$@"); }
   # The inner script expands its own positional arguments, not this shell's.
   # shellcheck disable=SC2016
-  env PATH="$FAKEBIN:$PATH" FM_FAKE_HERDR_LOG="$HERDR_LOG" FM_HOME="$HOME_DIR" "$@" \
-    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_display_agent "$1" "$2" "$3"' \
-    "$ROOT" "$session" "$pane" "$text"
+  env PATH="$FAKEBIN:$PATH" FM_FAKE_HERDR_LOG="$HERDR_LOG" FM_HOME="$HOME_DIR" ${envs[@]+"${envs[@]}"} \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/herdr.sh"; "$@"' "$ROOT" "${args[@]}"
+}
+
+joined() {  # <args...> -> unit-separated, matching the fake's log line
+  local out
+  out=$(printf '%s\x1f' "$@")
+  printf '%s' "${out%$'\x1f'}"
 }
 
 text=$(label exact) || fail "herdr call: label exited non-zero"
-report fm-labels-fake 'w1:p2' "$text" || fail "herdr call: report exited non-zero"
-expected=$(printf '%s\x1f' pane report-metadata 'w1:p2' --source firstmate-model-label \
-  --display-agent 'claude · opus5 · hi' --session fm-labels-fake)
-assert_equals "${expected%$'\x1f'}" "$(cat "$HERDR_LOG")" "the pane id precedes every option in the Herdr call"
-pass "herdr: report-metadata puts the pane id before its options"
+herdr_backend fm_backend_herdr_report_display_agent fm-labels-fake 'w1:p2' "$text" || fail "herdr call: label report exited non-zero"
+herdr_backend fm_backend_herdr_report_worker_mark fm-labels-fake w7 || fail "herdr call: worker mark exited non-zero"
+assert_equals "$(joined pane report-metadata 'w1:p2' --source firstmate-model-label \
+  --display-agent 'claude · opus5 · hi' --session fm-labels-fake)" "$(sed -n 1p "$HERDR_LOG")" \
+  "the pane id precedes every option in the label call"
+assert_equals "$(joined workspace report-metadata w7 --source firstmate-worker-mark \
+  --token 'wt=●' --session fm-labels-fake)" "$(sed -n 2p "$HERDR_LOG")" \
+  "the workspace id precedes every option in the worker-mark call"
+pass "herdr: pane and workspace ids come before their options"
 
 : > "$HERDR_LOG"
 rc=0
-report fm-labels-fake 'w1:p2' "$text" FM_FAKE_HERDR_EXIT=3 2>/dev/null || rc=$?
-expect_code 3 "$rc" "a failed Herdr call returns its status to the caller"
+herdr_backend fm_backend_herdr_report_display_agent fm-labels-fake 'w1:p2' "$text" -- FM_FAKE_HERDR_EXIT=3 2>/dev/null || rc=$?
+expect_code 3 "$rc" "a failed label call returns its status to the caller"
 rc=0
-report fm-labels-fake 'w1:p2' '' || rc=$?
+herdr_backend fm_backend_herdr_report_worker_mark fm-labels-fake w7 -- FM_FAKE_HERDR_EXIT=4 2>/dev/null || rc=$?
+expect_code 4 "$rc" "a failed worker-mark call returns its status to the caller"
+rc=0
+herdr_backend fm_backend_herdr_report_display_agent fm-labels-fake 'w1:p2' '' || rc=$?
 expect_code 1 "$rc" "an empty label is refused"
-assert_equals 1 "$(wc -l < "$HERDR_LOG" | tr -d ' ')" "an empty label never reaches Herdr"
+rc=0
+herdr_backend fm_backend_herdr_report_worker_mark fm-labels-fake '' || rc=$?
+expect_code 1 "$rc" "an empty workspace id is refused"
+assert_equals 2 "$(wc -l < "$HERDR_LOG" | tr -d ' ')" "refused calls never reach Herdr"
 pass "herdr: failures surface to the best-effort caller"

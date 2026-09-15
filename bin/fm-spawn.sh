@@ -4640,12 +4640,32 @@ SPAWN_META_LOCK_HELD=0
 if [ "$BACKEND" = herdr ]; then
   SPAWN_MODEL_LABEL=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-model-labels.sh" label "$ID" 2>/dev/null) || SPAWN_MODEL_LABEL=
-  if [ -z "$SPAWN_MODEL_LABEL" ] || ! fm_backend_source herdr 2>/dev/null \
-    || ! fm_backend_herdr_report_display_agent \
-    "$(fm_meta_get "$STATE/$ID.meta" herdr_session)" \
-    "$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)" \
-    "$SPAWN_MODEL_LABEL" >/dev/null 2>&1; then
+  SPAWN_HERDR_SES=$(fm_meta_get "$STATE/$ID.meta" herdr_session)
+  SPAWN_HERDR_WS=$(fm_meta_get "$STATE/$ID.meta" herdr_workspace_id)
+  if ! fm_backend_source herdr 2>/dev/null; then
     echo "warning: could not show the model label for $ID in the Herdr sidebar; the worker is unaffected" >&2
+  else
+    if [ -z "$SPAWN_MODEL_LABEL" ] || ! fm_backend_herdr_report_display_agent \
+      "$SPAWN_HERDR_SES" "$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)" \
+      "$SPAWN_MODEL_LABEL" >/dev/null 2>&1; then
+      echo "warning: could not show the model label for $ID in the Herdr sidebar; the worker is unaffected" >&2
+    fi
+    # The sage worker marker goes only on this worker's own child space: its
+    # presentation journal must still correlate live to exactly the recorded
+    # workspace. A flat placement in firstmate's or a parent space has no such
+    # journal, so it is silently left unmarked.
+    SPAWN_HERDR_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID") || SPAWN_HERDR_JOURNAL=
+    if [ "$KIND" != secondmate ] && [ -n "$SPAWN_HERDR_WS" ] \
+      && fm_backend_herdr_projection_journal_snapshot "$SPAWN_HERDR_JOURNAL" "$ID" 2>/dev/null \
+      && { [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] \
+        || { [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 4 ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$SPAWN_HERDR_SES" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" != "$SPAWN_HERDR_WS" ]; }; } \
+      && fm_backend_herdr_projection_endpoint_matches_journal \
+        "$SPAWN_HERDR_SES" "$SPAWN_HERDR_WS" "$SPAWN_HERDR_JOURNAL" "$ID" 2>/dev/null \
+      && ! fm_backend_herdr_report_worker_mark "$SPAWN_HERDR_SES" "$SPAWN_HERDR_WS" >/dev/null 2>&1; then
+      echo "warning: could not mark $ID's own space in the Herdr sidebar; the worker is unaffected" >&2
+    fi
   fi
 fi
 
