@@ -452,6 +452,14 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Model labels (config/model-labels.toml)
+
+`config/model-labels.toml` is an optional local, gitignored lookup of short aliases for recorded model names and effort levels.
+On the Herdr backend, `bin/fm-spawn.sh` uses it after every launch and relaunch to show the worker's runtime, model, and effort beside the agent name in Herdr's sidebar, for example `claude · opus5 · hi`.
+It is display only: no dispatch step reads it, so it never changes which harness, model, or effort a worker gets.
+An unknown model or effort shows its raw recorded name, and a failure to set the label warns once without affecting the worker.
+Update the file only when the captain asks, then run `bin/fm-model-labels.sh check`; that script's header owns the accepted syntax, schema, and label rules.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

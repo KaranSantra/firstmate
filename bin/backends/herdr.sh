@@ -2997,6 +2997,17 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# fm_backend_herdr_report_display_agent: show <label> (bin/fm-model-labels.sh)
+# as <pane_id>'s agent name in Herdr's sidebar agents column, under the
+# display-only firstmate-model-label metadata source. The pane id must come
+# before the options: Herdr 0.8.2 rejects options placed first with
+# "unknown option". Callers treat a failure as cosmetic.
+fm_backend_herdr_report_display_agent() {  # <session> <pane_id> <label>
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source firstmate-model-label --display-agent "$3"
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.

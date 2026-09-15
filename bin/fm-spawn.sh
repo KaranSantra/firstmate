@@ -4634,6 +4634,21 @@ fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 
+# Display-only Herdr sidebar label naming the runtime, model, and effort
+# (bin/fm-model-labels.sh). It runs after the commit point for a launch and a
+# relaunch alike, so a failure warns once and never changes the spawn's outcome.
+if [ "$BACKEND" = herdr ]; then
+  SPAWN_MODEL_LABEL=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-model-labels.sh" label "$ID" 2>/dev/null) || SPAWN_MODEL_LABEL=
+  if [ -z "$SPAWN_MODEL_LABEL" ] || ! fm_backend_source herdr 2>/dev/null \
+    || ! fm_backend_herdr_report_display_agent \
+    "$(fm_meta_get "$STATE/$ID.meta" herdr_session)" \
+    "$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)" \
+    "$SPAWN_MODEL_LABEL" >/dev/null 2>&1; then
+    echo "warning: could not show the model label for $ID in the Herdr sidebar; the worker is unaffected" >&2
+  fi
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 SPAWN_CHROME=
