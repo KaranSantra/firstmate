@@ -30,8 +30,8 @@
 # clears it, and bin/fm-teardown.sh drops the record with the rest of the task.
 # Only a working or parked run-step verdict ever shows a marker.
 #
-# Unknown, absent, or unreadable state shows nothing at all rather than a
-# placeholder. A task with no local Herdr row - another runtime, or a remote
+# Unknown or absent state shows nothing at all rather than a placeholder. A
+# task with no local Herdr row - another runtime, or a remote
 # secondmate whose row is on another machine - is excluded before any state is
 # read, so it never pays for an answer that has nowhere to land. A Herdr that
 # rejects the call, or no Herdr at all, leaves the row exactly as it was and
@@ -69,6 +69,10 @@ usage() {
 
 record_path() {  # <id>
   printf '%s/%s.state-marker' "$STATE" "$1"
+}
+
+failure_path() {  # <id>
+  printf '%s/%s.state-marker.error' "$STATE" "$1"
 }
 
 update_lock_path() {  # <id>
@@ -109,14 +113,67 @@ state_key() {  # <line>
 }
 
 # marker_for <id>: the marker string for a task's current state, empty for none.
-marker_for() {  # <id>
-  local line key
-  line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$CREW_STATE_BIN" "$1" 2>/dev/null) || return 0
+marker_for() {  # <id> -> sets MARKER_VALUE or MARKER_FAILURE
+  local line key out
+  MARKER_VALUE=
+  MARKER_FAILURE=
+  if ! line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CREW_STATE_BIN" "$1" 2>/dev/null); then
+    MARKER_FAILURE="state read failed"
+    return 1
+  fi
   key=$(state_key "$line")
   [ -n "$key" ] || return 0
-  FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
-    "$LABELS_BIN" marker "$key" 2>/dev/null || return 0
+  if ! out=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$LABELS_BIN" marker "$key" 2>&1); then
+    out=${out%%$'\n'*}
+    out=${out//$'\r'/}
+    MARKER_FAILURE="marker lookup failed"
+    [ -z "$out" ] || MARKER_FAILURE="$MARKER_FAILURE: ${out:0:200}"
+    return 1
+  fi
+  MARKER_VALUE=$out
+}
+
+read_failure() {  # <id> -> sets FAIL_AT, FAIL_MESSAGE
+  local path line tab=$'\t'
+  FAIL_AT=0
+  FAIL_MESSAGE=
+  path=$(failure_path "$1")
+  [ -r "$path" ] || return 0
+  IFS= read -r line < "$path" || return 0
+  FAIL_AT=${line%%"$tab"*}
+  case "$FAIL_AT" in '' | *[!0-9]*) FAIL_AT=0 ;; esac
+  FAIL_MESSAGE=${line#*"$tab"}
+  [ "$FAIL_MESSAGE" != "$line" ] || FAIL_MESSAGE=$line
+}
+
+write_failure() {  # <id> <epoch> <message>
+  local path tmp
+  path=$(failure_path "$1")
+  tmp="$path.tmp.$$"
+  printf '%s\t%s\n' "$2" "$3" > "$tmp" 2>/dev/null || return 0
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+}
+
+emit_failure_once() {  # <id> <epoch> <message>
+  local prior
+  read_failure "$1"
+  prior=$FAIL_MESSAGE
+  write_failure "$1" "$2" "$3"
+  [ "$prior" = "$3" ] && return 0
+  printf 'error: state marker %s: %s\n' "$1" "$3" >&2
+}
+
+clear_failure() {  # <id>
+  rm -f "$(failure_path "$1")" 2>/dev/null
+}
+
+failure_within_interval() {  # <id> <now>
+  local latest=$REC_AT
+  read_failure "$1"
+  [ "$FAIL_AT" -le "$latest" ] || latest=$FAIL_AT
+  [ "$latest" -gt 0 ] && [ $(( $2 - latest )) -lt "$INTERVAL" ]
 }
 
 # herdr_target <id>: "<session>\t<pane>" for a task with a local Herdr row, else
@@ -212,16 +269,25 @@ cmd_update() {  # <id>
   fi
   read_record "$id"
   now=$(now_epoch)
-  if [ "$REC_AT" -gt 0 ] && [ $((now - REC_AT)) -lt "$INTERVAL" ]; then
+  if failure_within_interval "$id" "$now"; then
     fm_lock_release "$lock" || true
     return 0
   fi
-  marker=$(marker_for "$id")
+  if ! marker_for "$id"; then
+    current=$(herdr_target "$id")
+    if [ "$current" = "$target" ]; then
+      emit_failure_once "$id" "$now" "$MARKER_FAILURE"
+    fi
+    fm_lock_release "$lock" || true
+    return 0
+  fi
+  marker=$MARKER_VALUE
   current=$(herdr_target "$id")
   if [ "$current" != "$target" ]; then
     fm_lock_release "$lock" || true
     return 0
   fi
+  clear_failure "$id"
   if [ "$REC_CONFIRMED" = 1 ] && [ "$marker" = "$REC_MARKER" ]; then
     write_record "$id" "$now" 1 "$marker"
   elif publish_target "$target" "$marker"; then
@@ -245,6 +311,7 @@ cmd_clear() {  # <id>
   elif [ -n "$REC_MARKER" ]; then
     write_record "$id" "$REC_AT" 0 "$REC_MARKER"
   fi
+  clear_failure "$id"
   fm_lock_release "$lock" || true
 }
 
@@ -256,6 +323,7 @@ cmd_retire() {  # <id>
   lock=$(update_lock_path "$id")
   fm_lock_acquire_wait "$lock"
   rm -f "$(record_path "$id")" 2>/dev/null
+  clear_failure "$id"
   fm_lock_release "$lock" || true
 }
 
@@ -264,7 +332,11 @@ cmd_state() {  # <id>
   case "$id" in
     '' | */* | .*) die "state needs a task id" 2 ;;
   esac
-  marker_for "$id"
+  marker_for "$id" || {
+    printf 'error: state marker %s: %s\n' "$id" "$MARKER_FAILURE" >&2
+    return 1
+  }
+  printf '%s\n' "$MARKER_VALUE"
 }
 
 case "${1:-}" in
