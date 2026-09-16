@@ -210,6 +210,22 @@ pass "clear: the marker and its record are both retired"
 
 reset_logs
 say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 >/dev/null
+reset_logs
+marker_run clear t FM_FAKE_HERDR_EXIT=2
+assert_equals 1 "$(herdr_calls)" "a refused clear still reaches Herdr once"
+assert_equals $'0\t◆cx' "$(cat "$STATE_DIR/t.state-marker")" \
+  "a refused clear preserves the shown marker for retry"
+reset_logs
+say 'state: done · source: run-step · checks green: PR ready for review'
+marker_run update t FM_STATE_MARKER_INTERVAL=0
+assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
+  --clear-token st --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
+  "the update after a refused clear retries the clear"
+pass "clear: a refusal keeps the marker retryable"
+
+reset_logs
+say 'state: working · source: run-step · validating (running: review)'
 marker_run update t FM_STATE_MARKER_INTERVAL=0 FM_FAKE_CREW_DELAY=1 &
 stale_update=$!
 i=0
@@ -233,6 +249,29 @@ assert_equals "$(joined pane report-metadata w3:p3 --source firstmate-state-mark
 fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 \
   herdr_pane_id=w1:p1 kind=ship
 pass "clear: a stale refresh cannot repaint a relaunched row"
+
+reset_logs
+rm -f "$STATE_DIR/t.state-marker"
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 FM_FAKE_CREW_DELAY=1 &
+stale_retirement_update=$!
+i=0
+while [ "$(crew_calls)" -lt 1 ]; do
+  [ "$i" -lt 30 ] || fail "the retiring refresh never began its state read"
+  sleep 0.1
+  i=$((i + 1))
+done
+rm -f "$STATE_DIR/t.meta"
+marker_run retire t &
+retire_after_teardown=$!
+sleep 0.1
+kill -0 "$retire_after_teardown" 2>/dev/null || fail "retirement did not wait for the in-flight refresh"
+wait "$stale_retirement_update" || fail "the retiring refresh failed"
+wait "$retire_after_teardown" || fail "retirement after teardown failed"
+[ ! -e "$STATE_DIR/t.state-marker" ] || fail "retirement left a marker record behind"
+fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 \
+  herdr_pane_id=w1:p1 kind=ship
+pass "retire: teardown cannot leave a stale refresh record"
 
 # --- quiet degradation -------------------------------------------------------
 
