@@ -208,6 +208,32 @@ assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-mark
 [ -f "$STATE_DIR/t.state-marker" ] && fail "clear left its record behind"
 pass "clear: the marker and its record are both retired"
 
+reset_logs
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 FM_FAKE_CREW_DELAY=1 &
+stale_update=$!
+i=0
+while [ "$(crew_calls)" -lt 1 ]; do
+  [ "$i" -lt 30 ] || fail "the stale refresh never began its state read"
+  sleep 0.1
+  i=$((i + 1))
+done
+fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s3 \
+  herdr_pane_id=w3:p3 kind=ship
+marker_run clear t &
+clear_after_relaunch=$!
+sleep 0.1
+kill -0 "$clear_after_relaunch" 2>/dev/null || fail "clear did not wait for the in-flight refresh"
+wait "$stale_update" || fail "the stale refresh failed"
+wait "$clear_after_relaunch" || fail "clear after relaunch failed"
+assert_equals "$(joined pane report-metadata w3:p3 --source firstmate-state-marker \
+  --clear-token st --session s3)" "$(tail -n 1 "$HERDR_LOG")" \
+  "the replacement row is cleared after the stale refresh completes"
+[ ! -e "$STATE_DIR/t.state-marker" ] || fail "clear after relaunch left a marker record behind"
+fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 \
+  herdr_pane_id=w1:p1 kind=ship
+pass "clear: a stale refresh cannot repaint a relaunched row"
+
 # --- quiet degradation -------------------------------------------------------
 
 # No other runtime has this sidebar, so a non-herdr task must never reach Herdr -
