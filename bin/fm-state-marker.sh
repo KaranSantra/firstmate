@@ -41,8 +41,9 @@
 # Paths: task records come from FM_STATE_OVERRIDE or $FM_HOME/state, the glyph
 # lookup from FM_CONFIG_OVERRIDE or $FM_HOME/config, and the marker record is
 # <state>/<task-id>.state-marker, holding the epoch second of the last state
-# read and the marker then shown. Both are passed down to the state reader and
-# the lookup, so a secondmate home marks its own rows from its own records.
+# read, whether its marker is confirmed on the row, and that marker. Both are
+# passed down to the state reader and the lookup, so a secondmate home marks
+# its own rows from its own records.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -161,29 +162,40 @@ publish_target() {  # <session>\t<pane> <marker>
   fi
 }
 
-read_record() {  # <id> -> sets REC_AT, REC_MARKER
-  local rec line
+read_record() {  # <id> -> sets REC_AT, REC_CONFIRMED, REC_MARKER
+  local rec line rest tab=$'\t'
   REC_AT=0
+  REC_CONFIRMED=0
   REC_MARKER=
   rec=$(record_path "$1")
   [ -r "$rec" ] || return 0
   IFS= read -r line < "$rec" || return 0
-  REC_AT=${line%%	*}
+  REC_AT=${line%%"$tab"*}
   case "$REC_AT" in '' | *[!0-9]*) REC_AT=0 ;; esac
-  REC_MARKER=${line#*	}
-  [ "$REC_MARKER" != "$line" ] || REC_MARKER=
+  rest=${line#*"$tab"}
+  [ "$rest" != "$line" ] || return 0
+  case "$rest" in
+    *"$tab"*)
+      REC_CONFIRMED=${rest%%"$tab"*}
+      REC_MARKER=${rest#*"$tab"}
+      case "$REC_CONFIRMED" in 0 | 1) ;; *) REC_CONFIRMED=0 ;; esac
+      ;;
+    *)
+      REC_MARKER=$rest
+      ;;
+  esac
 }
 
-write_record() {  # <id> <epoch> <marker>
+write_record() {  # <id> <epoch> <confirmed> <marker>
   local rec tmp
   rec=$(record_path "$1")
   tmp="$rec.tmp.$$"
-  printf '%s\t%s\n' "$2" "$3" > "$tmp" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\n' "$2" "$3" "$4" > "$tmp" 2>/dev/null || return 0
   mv -f "$tmp" "$rec" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
 cmd_update() {  # <id>
-  local id=${1:-} now marker shown target current lock
+  local id=${1:-} now marker target current lock
   case "$id" in
     '' | */* | .*) die "update needs a task id" 2 ;;
   esac
@@ -210,11 +222,13 @@ cmd_update() {  # <id>
     fm_lock_release "$lock" || true
     return 0
   fi
-  shown=$REC_MARKER
-  if [ "$marker" = "$REC_MARKER" ] || publish_target "$target" "$marker"; then
-    shown=$marker
+  if [ "$REC_CONFIRMED" = 1 ] && [ "$marker" = "$REC_MARKER" ]; then
+    write_record "$id" "$now" 1 "$marker"
+  elif publish_target "$target" "$marker"; then
+    write_record "$id" "$now" 1 "$marker"
+  else
+    write_record "$id" "$now" 0 "$REC_MARKER"
   fi
-  write_record "$id" "$now" "$shown"
   fm_lock_release "$lock" || true
 }
 
@@ -229,7 +243,7 @@ cmd_clear() {  # <id>
   if publish "$id" ""; then
     rm -f "$(record_path "$id")" 2>/dev/null
   elif [ -n "$REC_MARKER" ]; then
-    write_record "$id" 0 "$REC_MARKER"
+    write_record "$id" "$REC_AT" 0 "$REC_MARKER"
   fi
   fm_lock_release "$lock" || true
 }

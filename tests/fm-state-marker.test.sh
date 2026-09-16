@@ -214,8 +214,12 @@ marker_run update t FM_STATE_MARKER_INTERVAL=0 >/dev/null
 reset_logs
 marker_run clear t FM_FAKE_HERDR_EXIT=2
 assert_equals 1 "$(herdr_calls)" "a refused clear still reaches Herdr once"
-assert_equals $'0\t◆cx' "$(cat "$STATE_DIR/t.state-marker")" \
-  "a refused clear preserves the shown marker for retry"
+IFS=$'\t' read -r recorded_at recorded_confirmed recorded_marker < "$STATE_DIR/t.state-marker"
+case "$recorded_at" in
+  '' | *[!0-9]*) fail "a refused clear did not preserve the last-read timestamp" ;;
+esac
+assert_equals 0 "$recorded_confirmed" "a refused clear leaves the shown marker unconfirmed"
+assert_equals '◆cx' "$recorded_marker" "a refused clear preserves the shown marker for retry"
 reset_logs
 say 'state: done · source: run-step · checks green: PR ready for review'
 marker_run update t FM_STATE_MARKER_INTERVAL=0
@@ -223,6 +227,19 @@ assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-mark
   --clear-token st --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
   "the update after a refused clear retries the clear"
 pass "clear: a refusal keeps the marker retryable"
+
+reset_logs
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 >/dev/null
+reset_logs
+marker_run clear t FM_FAKE_HERDR_EXIT=2
+reset_logs
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0
+assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
+  --token 'st=◆cx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
+  "a recovered review republishes its unconfirmed matching marker"
+pass "clear: a recovered review row is labeled again"
 
 reset_logs
 say 'state: working · source: run-step · validating (running: review)'
