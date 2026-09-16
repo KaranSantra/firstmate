@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-model-labels.sh label rendering and lookup checks,
-# plus the argument order of bin/backends/herdr.sh's sidebar-label and
-# worker-space-marker calls, driven through a logging fake herdr so no live
-# Herdr is touched.
+# Behavior tests for bin/fm-model-labels.sh label rendering, pipeline-state
+# marker lookup, and lookup checks, plus the argument order of
+# bin/backends/herdr.sh's sidebar-label, worker-space-marker, and
+# state-marker calls, driven through a logging fake herdr so no live Herdr is
+# touched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -208,3 +209,121 @@ herdr_backend fm_backend_herdr_report_worker_mark fm-labels-fake '' || rc=$?
 expect_code 1 "$rc" "an empty workspace id is refused"
 assert_equals 2 "$(wc -l < "$HERDR_LOG" | tr -d ' ')" "refused calls never reach Herdr"
 pass "herdr: failures surface to the best-effort caller"
+
+# --- pipeline-state markers --------------------------------------------------
+
+marker() {  # <state key> [env assignments...] -> marker on stdout, stderr in $ERR
+  local key=$1
+  shift
+  env FM_HOME="$HOME_DIR" "$@" "$SCRIPT" marker "$key" 2>"$ERR"
+}
+
+# Shipped defaults mean the sidebar marker works before the captain has written
+# a single line of lookup: this file has no [states] table at all.
+assert_equals "◆cx" "$(marker review)" "review shows the reviewer's default marker"
+assert_equals "◈fx" "$(marker fix)" "a fix round shows its default marker"
+assert_equals "◌ci" "$(marker ci)" "ci shows its default marker"
+assert_equals "◍?" "$(marker decision)" "a lane held for an answer shows its default marker"
+pass "marker: shipped defaults render with no lookup entry"
+
+# Nothing at all for a state this release does not mark - never a placeholder.
+assert_equals "" "$(marker nosuchstate)" "an unmarked state shows nothing"
+pass "marker: an unknown state shows nothing rather than a placeholder"
+
+STATES_OK="$TMP_ROOT/states-ok.toml"
+cat > "$STATES_OK" <<'TOML'
+[meta]
+schema = 1
+
+[states.glyphs]
+review = "@cl"
+test = "%tt"
+TOML
+assert_equals "@cl" "$(marker review FM_MODEL_LABELS_FILE="$STATES_OK")" \
+  "a configured glyph replaces the default"
+assert_equals "%tt" "$(marker test FM_MODEL_LABELS_FILE="$STATES_OK")" \
+  "a second configured glyph replaces its default"
+assert_equals "◌ci" "$(marker ci FM_MODEL_LABELS_FILE="$STATES_OK")" \
+  "an unconfigured state keeps its shipped default"
+pass "marker: the lookup overrides a glyph without a code change"
+
+assert_contains "$(check_file "$STATES_OK")" "ok:" "a valid states table checks clean"
+pass "marker: check accepts a valid states table"
+
+# A malformed lookup is LOUD here: the marker is the captain's own surface, so a
+# typo must be visible rather than quietly showing him the wrong symbol.
+STATES_BAD="$TMP_ROOT/states-bad.toml"
+printf '[states.glyphs\nreview = "x"\n' > "$STATES_BAD"
+rc=0
+out=$(marker review FM_MODEL_LABELS_FILE="$STATES_BAD") || rc=$?
+expect_code 1 "$rc" "an unparseable lookup fails the marker instead of falling back"
+assert_equals "" "$out" "a failed marker prints nothing on stdout"
+assert_contains "$(cat "$ERR")" "could not be read" "the marker says why it showed nothing"
+pass "marker: an unparseable lookup fails loudly"
+
+# Horizontal space is the whole constraint, so an over-long glyph is an error,
+# not a silently truncated or silently accepted value.
+STATES_LONG="$TMP_ROOT/states-long.toml"
+cat > "$STATES_LONG" <<'TOML'
+[meta]
+schema = 1
+
+[states.glyphs]
+review = "codex reviewing"
+TOML
+rc=0
+out=$(marker review FM_MODEL_LABELS_FILE="$STATES_LONG") || rc=$?
+expect_code 1 "$rc" "an over-long glyph fails the marker"
+assert_equals "" "$out" "an over-long glyph shows nothing"
+assert_contains "$(check_file "$STATES_LONG")" "symbol plus at most two characters" \
+  "check names the horizontal-space limit it enforced"
+pass "marker: an over-long glyph is refused with the reason"
+
+STATES_UNKNOWN="$TMP_ROOT/states-unknown.toml"
+cat > "$STATES_UNKNOWN" <<'TOML'
+[meta]
+schema = 1
+
+[states.glyphs]
+nosuchstep = "@x"
+TOML
+out=$(check_file "$STATES_UNKNOWN")
+assert_contains "$out" "warning: states.glyphs.nosuchstep" "an unrecognised state is named"
+assert_contains "$out" "ok:" "an unrecognised state stays a warning, never a failure"
+pass "marker: an unrecognised state name warns without failing the lookup"
+
+# --- herdr state-marker call shape -------------------------------------------
+
+: > "$HERDR_LOG"
+herdr_backend fm_backend_herdr_report_state_marker fm-labels-fake 'w1:p2' "◆cx" \
+  || fail "herdr call: state marker report exited non-zero"
+herdr_backend fm_backend_herdr_clear_state_marker fm-labels-fake 'w1:p2' \
+  || fail "herdr call: state marker clear exited non-zero"
+assert_equals "$(joined pane report-metadata 'w1:p2' --source firstmate-state-marker \
+  --token "st=◆cx" --session fm-labels-fake)" "$(sed -n 1p "$HERDR_LOG")" \
+  "the pane id precedes every option in the state-marker call"
+assert_equals "$(joined pane report-metadata 'w1:p2' --source firstmate-state-marker \
+  --clear-token st --session fm-labels-fake)" "$(sed -n 2p "$HERDR_LOG")" \
+  "clearing names the same token under the same source"
+pass "herdr: the state marker is set and cleared under its own source"
+
+# The marker must never be able to overwrite the model label: they are separate
+# metadata sources precisely so a state change cannot cost the row its label.
+assert_not_contains "$(cat "$HERDR_LOG")" "--display-agent" \
+  "the state marker never touches the display agent"
+assert_not_contains "$(cat "$HERDR_LOG")" "firstmate-model-label" \
+  "the state marker never writes the label's source"
+pass "herdr: the state marker cannot clobber the model label"
+
+: > "$HERDR_LOG"
+rc=0
+herdr_backend fm_backend_herdr_report_state_marker fm-labels-fake 'w1:p2' "◆cx" -- FM_FAKE_HERDR_EXIT=5 2>/dev/null || rc=$?
+expect_code 5 "$rc" "a failed state-marker call returns its status to the caller"
+rc=0
+herdr_backend fm_backend_herdr_report_state_marker fm-labels-fake 'w1:p2' '' || rc=$?
+expect_code 1 "$rc" "an empty marker is refused"
+rc=0
+herdr_backend fm_backend_herdr_clear_state_marker fm-labels-fake '' || rc=$?
+expect_code 1 "$rc" "an empty pane id is refused when clearing"
+assert_equals 1 "$(wc -l < "$HERDR_LOG" | tr -d ' ')" "refused state-marker calls never reach Herdr"
+pass "herdr: state-marker failures surface to the best-effort caller"

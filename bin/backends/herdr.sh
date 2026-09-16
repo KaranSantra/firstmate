@@ -3019,6 +3019,37 @@ fm_backend_herdr_report_worker_mark() {  # <session> <workspace_id>
     --source firstmate-worker-mark --token 'wt=●'
 }
 
+# The metadata source and token name carrying the pipeline-state marker. It is
+# deliberately NOT the firstmate-model-label source above: that source owns the
+# row's display agent, and a second writer of the same field would clobber the
+# model label every time the state changed. A token from its own source rides
+# alongside it instead, which is also why the marker can be retired on its own
+# without touching the label. Verified against Herdr 0.8.2: a pane carries one
+# source's display_agent and another source's token at the same time.
+FM_BACKEND_HERDR_STATE_MARKER_SOURCE=firstmate-state-marker
+FM_BACKEND_HERDR_STATE_MARKER_TOKEN=st
+
+# fm_backend_herdr_report_state_marker: show <marker> on <pane_id>'s sidebar row
+# as the display-only sign of what currently holds that lane. The pane id must
+# precede the options for the same Herdr 0.8.2 reason as the calls above.
+# Callers treat a failure as cosmetic.
+fm_backend_herdr_report_state_marker() {  # <session> <pane_id> <marker>
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source "$FM_BACKEND_HERDR_STATE_MARKER_SOURCE" \
+    --token "$FM_BACKEND_HERDR_STATE_MARKER_TOKEN=$3"
+}
+
+# fm_backend_herdr_clear_state_marker: remove that marker from <pane_id>, so a
+# row never keeps claiming a lane is in review once it is not. Clearing a token
+# that was never set is a no-op, which makes this safe to call unconditionally.
+fm_backend_herdr_clear_state_marker() {  # <session> <pane_id>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source "$FM_BACKEND_HERDR_STATE_MARKER_SOURCE" \
+    --clear-token "$FM_BACKEND_HERDR_STATE_MARKER_TOKEN"
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
