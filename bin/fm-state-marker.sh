@@ -210,7 +210,22 @@ cmd_clear() {  # <id>
   esac
   lock=$(update_lock_path "$id")
   fm_lock_acquire_wait "$lock"
-  publish "$id" ""
+  read_record "$id"
+  if publish "$id" ""; then
+    rm -f "$(record_path "$id")" 2>/dev/null
+  elif [ -n "$REC_MARKER" ]; then
+    write_record "$id" 0 "$REC_MARKER"
+  fi
+  fm_lock_release "$lock" || true
+}
+
+cmd_retire() {  # <id>
+  local id=${1:-} lock
+  case "$id" in
+    '' | */* | .*) die "retire needs a task id" 2 ;;
+  esac
+  lock=$(update_lock_path "$id")
+  fm_lock_acquire_wait "$lock"
   rm -f "$(record_path "$id")" 2>/dev/null
   fm_lock_release "$lock" || true
 }
@@ -226,6 +241,7 @@ cmd_state() {  # <id>
 case "${1:-}" in
   update) shift; cmd_update "$@" ;;
   clear) shift; cmd_clear "$@" ;;
+  retire) shift; cmd_retire "$@" ;;
   state) shift; cmd_state "$@" ;;
   -h | --help) usage ;;
   *) usage >&2; exit 2 ;;
