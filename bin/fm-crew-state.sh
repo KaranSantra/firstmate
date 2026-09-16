@@ -378,6 +378,46 @@ nm_active_steps_rows() {
   '
 }
 
+# The `step` cell of the FIRST active_steps[] row - the step the pipeline is
+# executing right now, for example review, test, document, or push. The table is
+# emitted only while a step actually runs or fixes, which is exactly when the
+# top-level status is running or fixing, so this is the one place a RUNNING run
+# names its own step. The column is located by NAME from the table header rather
+# than by position, matching nm_active_steps_rows' refusal to assume column
+# order. Prints nothing when the table, the column, or the cell is absent, which
+# leaves the caller's existing wording untouched.
+nm_active_step_name() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ {
+      hdr = index($0, "active_steps")
+      cols = $0
+      sub(/^[^{]*\{/, "", cols)
+      sub(/\}.*$/, "", cols)
+      n = split(cols, name, ",")
+      want = 0
+      for (i = 1; i <= n; i++) {
+        gsub(/^[ \t]+|[ \t]+$/, "", name[i])
+        if (name[i] == "step") want = i
+      }
+      inblock = 1
+      next
+    }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) exit
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) exit
+      if (want == 0) exit
+      n = split($0, cell, ",")
+      if (want > n) exit
+      value = cell[want]
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  '
+}
+
 # Rows of the `steps[N]{step,status,findings,duration_ms}:` table in the
 # captured run output ($RUN_OUT) - the full per-step ledger, present on
 # terminal runs too, unlike active_steps[] which the pipeline emits only while
@@ -688,7 +728,12 @@ if [ "$HAVE_RUN" = 1 ]; then
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
-        running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
+        running|fixing)
+          RUN_STATE=working
+          RUN_DETAIL="validating ($status)"
+          ACTIVE_STEP=$(nm_active_step_name)
+          [ -z "$ACTIVE_STEP" ] || RUN_DETAIL="validating ($status: $ACTIVE_STEP)"
+          ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
