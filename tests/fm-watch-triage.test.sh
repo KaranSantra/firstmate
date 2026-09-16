@@ -1875,6 +1875,141 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- a Herdr worker whose terminal vanished is surfaced once, with its work ---
+# Closing a Herdr project's parent row closes every worker space grouped under
+# it at once. A quiet worker's missing terminal used to be only a silently
+# skipped capture; it must wake firstmate once per lost endpoint, naming the
+# work its worktree still holds and whether its project parent is gone too.
+test_herdr_lost_endpoint_is_surfaced_once_with_its_work() {
+  local dir state fakebin out pid wt wt_real home_real window key sig
+  dir=$(make_case herdr-endpoint-lost); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  window="default:w3:p2"; key=default_w3_p2
+  wt="$dir/wt"
+  git init -q "$wt" || fail "could not create the lost worker's worktree fixture"
+  printf 'unsaved draft\n' > "$wt/draft.txt"
+  wt_real=$(cd "$wt" && pwd -P); home_real=$(cd "$dir" && pwd -P)
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"compatible":true}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' ;;
+  "pane read")
+    if [ -n "${FM_FAKE_HERDR_ALIVE:-}" ]; then printf '$ \n'; exit 0; fi
+    printf '{"error":{"code":"pane_not_found","message":"pane not found"}}\n' >&2; exit 1 ;;
+  "pane get") printf '{"error":{"code":"pane_not_found","message":"pane not found"}}\n' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$state/lost-a.meta" "window=$window" "backend=herdr" "kind=ship" "worktree=$wt" \
+    "project=/projects/demo" "herdr_session=default" "herdr_workspace_id=w3" "herdr_tab_id=w3:t2" "herdr_pane_id=w3:p2"
+  printf 'working: implementing\n' > "$state/lost-a.status"
+  sig=$(seen_sig "$state/lost-a.status"); printf '%s' "$sig" > "$state/.seen-lost-a_status"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_create "$1" lost-a "$2" >/dev/null || exit 1
+    fm_backend_herdr_projection_journal_bind "$1/lost-a.herdr-presentation" lost-a "$3" default \
+      w3 w3:t2 w3:p2 w2 demo lost-a fm-lost-a
+  ' "$ROOT" "$state" "$wt_real" "$home_real" || fail "could not bind the lost worker's grouping journal"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface a Herdr worker whose terminal is gone: $(cat "$out")"; }
+  grep -F "stale: $window (worker terminal gone: lost-a" "$out" >/dev/null \
+    || fail "the lost Herdr endpoint did not print a stale wake naming the worker: $(cat "$out")"
+  [ "$(grep -c 'worker terminal gone' "$state/.wake-queue" 2>/dev/null)" = 1 ] \
+    || fail "the lost Herdr endpoint was not queued exactly once: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "project /projects/demo; uncommitted changes in $wt" "$state/.wake-queue" >/dev/null \
+    || fail "the lost-worker wake did not name its project and uncommitted work: $(cat "$state/.wake-queue")"
+  grep -F "its Herdr project space 'demo' is closed too" "$state/.wake-queue" >/dev/null \
+    || fail "the lost-worker wake did not report its closed project parent: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.endpoint-lost-$key" 2>/dev/null)" = "$window" ] \
+    || fail "the lost endpoint was not remembered as already reported"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the lost-endpoint wake"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher re-surfaced an already reported lost endpoint: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  ! grep -F "worker terminal gone" "$out" >/dev/null || fail "an already reported lost endpoint printed a second wake"
+  ! grep -F "worker terminal gone" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "an already reported lost endpoint queued a second wake"
+
+  # A later endpoint that reuses the id and reads again clears the old marker,
+  # so it can never suppress that endpoint's own future loss report.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_ALIVE=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || true
+  reap "$pid"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  [ ! -e "$state/.endpoint-lost-$key" ] \
+    || fail "a readable endpoint left the lost-endpoint marker that would suppress its own future report"
+  pass "a Herdr worker whose terminal vanished is surfaced once, naming its project, its uncommitted work, and its closed project space"
+}
+
+# --- the lost-endpoint detection degrades to the old silent skip ---------------
+# An unreadable or unexpected Herdr answer is not proof a terminal is gone, so
+# it must neither report nor stop the watcher; broken recovery facts (a missing
+# worktree, a malformed journal) must still produce exactly one report.
+test_herdr_lost_endpoint_detection_degrades_safely() {
+  local dir state fakebin out pid window key sig
+  dir=$(make_case herdr-endpoint-degrade); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  window="default:w4:p2"; key=default_w4_p2
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"compatible":true}}\n' ;;
+  "pane read") exit 1 ;;
+  "pane get")
+    if [ -n "${FM_FAKE_HERDR_GONE:-}" ]; then
+      printf '{"error":{"code":"pane_not_found","message":"pane not found"}}\n' >&2; exit 1
+    fi
+    printf 'unexpected non-json answer\n' ;;
+  "workspace list") printf 'also not json\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$state/odd-b.meta" "window=$window" "backend=herdr" "kind=ship" "worktree=$dir/no-such-worktree" \
+    "herdr_session=default" "herdr_workspace_id=w4" "herdr_tab_id=w4:t2" "herdr_pane_id=w4:p2"
+  printf 'working: implementing\n' > "$state/odd-b.status"
+  sig=$(seen_sig "$state/odd-b.status"); printf '%s' "$sig" > "$state/.seen-odd-b_status"
+  printf 'version=4\ngarbage\n' > "$state/odd-b.herdr-presentation"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an unexpected Herdr answer stopped the watcher instead of degrading to a silent skip: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  ! grep -F "worker terminal gone" "$out" >/dev/null || fail "an unreadable Herdr answer was reported as a lost terminal"
+  ! grep -F "worker terminal gone" "$state/.wake-queue" >/dev/null 2>&1 || fail "an unreadable Herdr answer queued a lost-terminal wake"
+  [ ! -e "$state/.endpoint-lost-$key" ] || fail "an unreadable Herdr answer wrote a lost-endpoint marker"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_GONE=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a lost terminal with broken recovery facts was not surfaced: $(cat "$out")"; }
+  [ "$(grep -c 'worker terminal gone' "$state/.wake-queue" 2>/dev/null)" = 1 ] \
+    || fail "a lost terminal with broken recovery facts was not queued exactly once: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "its recorded worktree '$dir/no-such-worktree' is missing" "$state/.wake-queue" >/dev/null \
+    || fail "the report did not say the recorded worktree is missing: $(cat "$state/.wake-queue")"
+  ! grep -F "project space" "$state/.wake-queue" >/dev/null || fail "a malformed journal produced a project-space claim"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  pass "the lost-terminal detection stays silent and keeps cycling on unexpected Herdr answers, and reports once despite broken recovery facts"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -4904,3 +5039,5 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_herdr_lost_endpoint_is_surfaced_once_with_its_work
+test_herdr_lost_endpoint_detection_degrades_safely

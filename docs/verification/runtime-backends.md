@@ -331,67 +331,89 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
-### Endpoint close
+## Fleet browser access
 
-A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
-Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
-Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
+Verified 2026-09-08 on Claude Code 2.1.263, chrome-devtools-axi 0.1.34 and Chrome 152.0.7977.82 (macOS).
+
+### Claude Code's Chrome integration is not on by default, and the default is not uniform
+
+`claude --chrome` and `claude --no-chrome` control whether a launched agent has the `mcp__claude-in-chrome__*` tools.
+The bare default is neither fixed nor uniform, which is why `bin/fm-spawn.sh` always emits one direction rather than relying on it.
+Measured by asking a launched agent to count its own tools whose names begin `mcp__claude-in-chrome`:
+
+| Launch | Print mode (`-p`) | Interactive (real tmux pane) |
+|---|---|---|
+| bare | 0 | 22 |
+| `--no-chrome` | 0 | 0 |
+| `--chrome` | 22 | 22 |
+| `--chrome --strict-mcp-config` | 0 | not run |
 
 ```sh
-tests/fm-teardown-endpoint-safety.test.sh
-tests/fm-backend-orca.test.sh
+echo 'Reply with exactly: COUNT=<number of tools available to you whose name begins with mcp__claude-in-chrome>. No other text.' | claude -p --chrome
 ```
 
-```text
-ok - fm-teardown: a close that genuinely failed refuses and keeps the record naming the surviving endpoint, and the same teardown finishes once the close works
-ok - fm-teardown: --force continues past a close it could not make while still reporting it, and the same case refuses without --force
-ok - fm-teardown: a close re-read that could not run refuses, while a definitively absent session or server still completes silently
-ok - fm-teardown: forced secondmate cleanup still refuses on a child endpoint close that failed
-ok - fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal
-ok - fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently
-ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
+```
+COUNT=22
 ```
 
-An endpoint that is already legitimately gone returns 0 silently on every arm, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
-The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
+Interactive mode was measured separately rather than inferred from print mode, because this repo already carries one flag (`--prompt-suggestions`) that works in print mode and not interactively.
+The `--strict-mcp-config` row shows the integration arrives as an ordinary MCP server rather than a built-in, which is also why it is absent from `claude mcp list`.
 
-| Backend | already gone | a close that failed |
-| --- | --- | --- |
-| tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
-| orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
-| zellij | 0, silent | 0, not yet distinguishable |
-| cmux | 0, silent | 0, not yet distinguishable |
-| herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
+The interactive default being on is what made this a real gap: a crewmate launched with no flag inherited the captain's extension and competed with his own session for it.
 
-The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
-Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
-tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
-It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
-Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
+### Sealed compartments carry a signed-in session without carrying the whole profile
 
-Two bounds of the refusal are known and deliberately not closed here.
+A compartment is a Chrome browser context inside the one work browser.
+`bin/fm-work-browser-cdp.mjs` creates it, hands it only the cookies whose domain is on the task's allowlist, and disposes it whole at teardown.
+Measured on a throwaway work browser with two seeded site logins, handing over one:
 
-`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
-That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
-A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
-It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
+```
+shared jar : site-a.example, site-b.example
+compartment: site-a.example
+```
 
-The Orca close refuses under `--force` too.
-The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
-The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
+A cookie added to the shared jar *after* sealing did not reach the compartment, so a later sign-in cannot widen an existing worker's blast radius:
 
-The retained record is this run's, not a durable guarantee.
-A task carrying a backlog transition writes its pending-close marker before the endpoint close, and the marker survives the refusal; the next `bin/fm-bootstrap.sh` replays it and removes the retained record.
-The pre-existing Herdr confirmed-gone gate has the identical property.
-The refusal message says so rather than promising a retention teardown does not own, so an operator reconciles the surviving endpoint instead of trusting the record to still be there later.
+```
+DEFAULT  jar: defaultonly,sharedlogin
+COMPARTMENT : sharedlogin
+```
 
-Both directions are proven non-vacuous.
-Restoring the swallowed status makes the refusal case report `teardown <id> complete`, delete the endpoint record, and leave the window live.
-Keeping the refusal but dropping the exact re-read makes an already-exited endpoint refuse its own cleanup, and also fails the cleanup identity case above.
-Letting an unreadable inventory pass for absence makes the unreadable case complete and remove the record while the window is still there.
-Removing the `--force` arm makes the forced generic case refuse; honoring `--force` at the child sites makes forced secondmate cleanup continue past a child endpoint it could not close, and honoring it at the Orca site makes that forced cleanup abort on the missing CLI after announcing that it was continuing.
-Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
-Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
+`Target.disposeBrowserContext` removed the context and its tab together (4 page targets to 3), and a repeated close is a no-op, so an interrupted teardown can retry.
+
+### The seal holds through the fleet's own tool, and `newpage` breaks it
+
+This is the link the strategy investigation did not test: it proved `chrome-devtools-axi` attaches to the work browser, not that a worker driving a compartment stays inside it.
+With `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointed at the work browser, `selectpage` onto the compartment's tab followed by `open` navigates that tab in place and stays sealed:
+
+```
+--- COMPARTMENT (page 2) ---
+result: "\"sharedlogin=DEFAULT-JAR\""
+--- DEFAULT (page 1) ---
+result: "\"sharedlogin=DEFAULT-JAR; defaultonly=SHARED-ONLY-MUST-NOT-LEAK\""
+```
+
+`newpage` does NOT stay sealed.
+It creates the tab in the browser's default context and leaves the session with no page selected:
+
+```
+93301EB1 ctx=DE0F5FE9 https://example.com/   <- default context
+F685BD2A ctx=DE0F5FE9 https://example.com/   <- newpage landed here
+B9C2A702 ctx=770B9D32 https://example.com/   <- the compartment
+```
+
+That is why the generated brief forbids `newpage` outright and tells a worker to navigate with `open` instead.
+
+### Refreshing this evidence
+
+`bash tests/fm-work-browser-live-e2e.test.sh` drives a real throwaway Chrome and re-checks the compartment properties, the idempotent close, and the refusal of port 9222.
+It spends no model tokens and runs by default wherever Chrome, `node` and `curl` are installed.
+The Claude Code flag matrix above is refreshed by rerunning the two commands in this section after a Claude Code upgrade.
+
+### Not established here
+
+- Cookies are carried into a compartment; `localStorage` is not, so a site keeping its login in the page presents as signed out inside the compartment.
+- No session value was ever read from the captain's personal Chrome (PID 46710, port 9222); it was unchanged before and after, and every browser used here was a throwaway on another port.
 
 ## Claude workspace trust
 
@@ -545,43 +567,6 @@ This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr com
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
-
-### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
-
-Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
-Idle, codex 0.154 animates a braille starfield on the row above its bold `›` prompt row, on the `›` row behind the SGR-2 dim `Ask Codex to do anything` placeholder, and on the row below it, then draws a status footer reading `gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief`.
-The starfield cells are truecolor greys whose luminance runs from roughly 66 to 165, so the cells above the 128 ghost ceiling survive ghost stripping, and the footer is bright, non-blank, and carries no structural edge.
-
-The capture is a read-only `herdr pane read <pane> --format ansi` of the live pane; its 20-row tail is fed to the shared classifier with the descriptor above:
-
-```sh
-herdr pane read w4Z:p2 --format ansi > codex-0.154-idle-herdr.ansi
-bash -c '. bin/fm-composer-lib.sh
-  caps=$(printf "styled=1\ncursor=0\nidentity=1\nrows=20")
-  fm_composer_classify_screen "$caps" "$(tail -n 20 codex-0.154-idle-herdr.ansi)"'
-```
-
-Observed output on the same capture before the fix (`bin/fm-composer-lib.sh` at b85e28b5) and then after it:
-
-```text
-pending
-empty
-```
-
-Before the fix the bare `›` shape extended its wrap region over the two rows beneath the glyph (`kind=bare first=17 last=19` within the 20-row tail), read the surviving starfield cells and the footer as wrapped typed input, and answered `pending`.
-The steering doorbell (`fm_task_inbox_ring` in `bin/fm-task-inbox-lib.sh`) defers on exactly that verdict, so every ring for the pane was recorded as skipped and the marked request was reported as a missed delivery.
-After the fix, braille-only rows bound the wrap region (the status footer sits beneath the starfield row, so the region never reaches it), starfield cells behind the placeholder are stripped from the glyph row, and the same capture reads `empty` under the Herdr and Zellij styled profiles and with a tmux cursor on the glyph row, while a plain (`styled=0`) capture still reads `unknown`, never `pending`.
-A second read-only capture of the same pane, taken during the fix with a bright starfield cell drawn between the `›` and the placeholder, read `pending` before and `empty` after as well.
-`test_matrix_codex_idle_starfield_furniture` in `tests/fm-composer-lib.test.sh` carries both samples byte-for-byte, the divergence (the same screen with letters in place of the starfield reads `pending`), and the over-stripping negatives (wrapped typed input, braille mixed with text, a typed row with a middle dot, and the footer or a starfield row alone).
-
-The live guard that refreshes this entry launches the installed codex idle in an isolated tmux server and asserts `empty` through both the cursor-anchored tmux read and the cursorless styled read Herdr and Zellij use, naming codex and `codex --version` on failure; it is default-on wherever codex and tmux are installed and spends no tokens:
-
-```sh
-tests/fm-composer-codex-idle-live-e2e.test.sh
-```
-
-The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
-The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
 ## Steering-inbox doorbell
 
@@ -992,20 +977,21 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 ```
 
-Observed guarantees on 2026-07-30 against Herdr 0.7.5 protocol 17:
+Observed guarantees on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```text
 ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
 ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
-ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
+ok - real herdr E2E: a presentation-enabled worker whose launcher sits at its project's checkout stays in that exact workspace without a journal or focus change
 ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
 ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
-ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
+ok - real herdr E2E: with a duplicated home label, a worker is never grouped under a Firstmate home space; it stays in the launcher's exact workspace and the sibling is untouched
 ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
 ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
 ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
 ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
 ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
 ```
 
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
@@ -1022,64 +1008,52 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
-The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
+The per-project grouping suite ran on 2026-09-14 against Herdr 0.8.2 protocol 20 on macOS aarch64:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-presentation-e2e.test.sh
 ```
 
-Observed guarantees included:
+Observed guarantees:
 
 ```text
-ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
-ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
-ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
-ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
-ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
-ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
+ok - real Herdr lab: an opted-out spawn stays flat in its launching space with zero grouping calls
+ok - real Herdr lab: a home that configured nothing is grouped under its project by default on herdr 0.8.2
+ok - real Herdr lab: a fresh worker is grouped as a plain-labeled linked child under one project parent with an exact version 4 binding and no focus drift
+ok - real Herdr lab: Treehouse commands and metadata shape are identical to the flat path except for endpoint IDs and spawn incarnation
+ok - real Herdr lab: a second worker on the same project reuses the one project parent
+ok - real Herdr lab: concurrent workers on one project end under exactly one parent without focus drift
+ok - real Herdr lab: bounded lock contention warns and stays flat without a journal, grouping calls, or focus drift
+ok - real Herdr lab: exact task-pane teardown removes only the child space, retires its journal, and leaves the project parent
+ok - real Herdr lab: concurrent grouped teardowns are serialized and leave the parent and active workspace/tab unchanged
+ok - real Herdr lab: a secondmate agent stays in its home workspace ungrouped, and the presentation setting inherits into secondmate homes
+ok - real Herdr lab: primary and secondmate homes each group their workers under that project's one parent with home-local journals
+ok - real Herdr lab: a launcher sitting at the project's own checkout is refused grouping and its worker stays flat with no residue
+ok - real Herdr lab: multi-home exact-pane teardowns keep parents and home spaces without workspace close authority
+ok - real Herdr lab: legacy presentation labels and flat secondmate tabs are left unmigrated
+ok - real Herdr lab: a re-dispatch whose project group was closed retires the stale binding and groups the new worker afresh
+ok - real Herdr lab: after a session restart a grouped worker is never reclaimed in place and its re-dispatch falls back flat
+ok - real Herdr lab: missing, renamed, and duplicate legacy titles trigger zero mutation calls, and live duplicate risk refuses launch
+ok - real Herdr lab: grouped journals correlate only by worktree membership, with zero mutation calls, and a live agent there refuses launch
+ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
 ```
 
-The suite also covers lost or failed move responses, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
+In-place reclaim of a retired version 2 binding is no longer exercised by that suite, because no production path writes one; `tests/fm-backend-herdr.test.sh` pins it with hand-written records.
 
-The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
+The Herdr behavior that grouping relies on was observed in guarded `fm-lab-` sessions on 2026-09-14 against Herdr 0.8.2 protocol 20, with every call made as `bin/fm-herdr-lab.sh run <lab-session> <arguments>`:
 
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
+- `workspace create --cwd <linked-worktree>` reported `"worktree":null` in `workspace list`, so a space created that way stays a top-level row.
+- `worktree open --cwd <main-checkout> --path <linked-worktree> --label <task> --no-focus` returned `"already_open":false` with `"is_linked_worktree":true` for the child, created a parent reporting `"is_linked_worktree":false` labeled with the repository name when none was open, and reused the one parent for later worktrees of the same repository, including a parent that had been renamed.
+- A space created with `workspace create --cwd <main-checkout>` became that project's parent the first time a worktree of the repository was opened.
+- Opening an already-open path returned `"already_open":true` and relabeled that existing space.
+- `worktree open --cwd <linked-worktree>` failed with `linked_worktree_source`, and `worktree open --workspace <non-git-space>` failed with `not_git_worktree`.
+- `pane move <pane> --new-tab --workspace <child> --label fm-<id> --no-focus` returned a new pane id with `previous_pane_id` naming the moved pane, and a background process started in that pane before the move was still running afterward.
+- Neither `worktree open --no-focus` nor `pane move --no-focus` changed the focused workspace or its active tab.
+- `workspace close <parent>` removed every space in that repository's group and ended the processes in their panes, while another repository's group, every worktree directory, and every branch remained.
+- Closing a child space, by `workspace close <child>` or by closing its only pane, removed only that child.
 
-Observed restart-reclaim guarantees:
-
-```text
-ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
-ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
-ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
-```
-
-The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enables the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-Observed default and opt-out guarantees:
-
-```text
-ok - real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls
-ok - real Herdr lab: a home that configured nothing is projected by default
-ok - real Herdr lab: the primary presentation setting inherits into real secondmate homes
-ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
-```
-
-The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
-That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
-
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+The restored-shell session-start cleanup ran on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
@@ -1253,7 +1227,6 @@ Real captures verified these active distinctions:
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
-- Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:

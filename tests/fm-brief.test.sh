@@ -802,25 +802,6 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-test_ship_and_scout_teach_validation_round_pause() {
-  local home kind id brief
-  home="$TMP_ROOT/validation-round-pause-home"
-  mkdir -p "$home/data"
-
-  for kind in ship scout; do
-    id="brief-validation-round-pause-$kind"
-    if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
-    else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
-    fi
-    brief="$home/data/$id/brief.md"
-    assert_grep "your own validation round" "$brief" \
-      "$kind brief did not teach workers to declare their validation-round wait"
-  done
-  pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
-}
-
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -902,6 +883,217 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The captain's standing instruction is that browser work drives his real,
+# logged-in Chrome; `chrome-devtools-axi` launches a separate "Chrome for
+# Testing" application that carries none of his logins, so its "not signed in"
+# verdicts are meaningless and every launch pops a window on his screen. The
+# scaffold used to instruct every worker to use exactly that tool, and a worker
+# also stood up a throwaway web server to look at its own HTML. Both halves of
+# the corrected rule are pinned here so neither can drift back.
+test_browser_rule_drives_the_captains_real_chrome() {
+  local home brief kind
+  home="$TMP_ROOT/browser-rule-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout secondmate; do
+    case "$kind" in
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" some-proj --scout \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+      secondmate)
+        FM_SECONDMATE_CHARTER='Supervise the sample domain.' \
+          FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" --secondmate some-proj \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+      *)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "browser-rule-$kind" some-proj --mode "$kind" \
+          >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+        ;;
+    esac
+    brief="$home/data/browser-rule-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # The tool may appear only inside a prohibition, never as an instruction, so
+    # this stays true however the surrounding wording is later rephrased.
+    if grep -n 'chrome-devtools-axi' "$brief" | grep -qvi 'never'; then
+      fail "$kind brief mentions chrome-devtools-axi outside a prohibition; it opens a separate browser with none of the captain's logins"
+    fi
+  done
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    brief="$home/data/browser-rule-$kind/brief.md"
+    assert_grep 'mcp__claude-in-chrome__' "$brief" \
+      "$kind brief did not point browser work at the captain's real Chrome"
+    assert_grep "never to preview or check your own HTML output" "$brief" \
+      "$kind brief did not forbid opening a browser to look at the worker's own output"
+    assert_grep "never start a web server to view your own" "$brief" \
+      "$kind brief did not forbid standing up a server to view the worker's own output"
+    assert_grep "gh-axi for GitHub operations" "$brief" \
+      "$kind brief lost the gh-axi instruction"
+  done
+  pass "fm-brief.sh: browser work drives the captain's real Chrome and never previews the worker's own output"
+}
+
+# A real AWS account id, the real client repository name, and an SSO ARN carrying the
+# captain's email address reached a test fixture and a verification document, and would
+# have been published the moment that branch was pushed to a public fork. The scaffold is
+# where the rule reaches every worker, so its presence is pinned here for all four kinds.
+test_synthetic_identifiers_rule() {
+  local home brief kind
+  home="$TMP_ROOT/synthetic-identifiers-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "synthetic-$kind" some-proj --scout \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "synthetic-$kind" some-proj --mode "$kind" \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    fi
+    brief="$home/data/synthetic-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+
+    assert_grep 'Never put real identifiers into tests, fixtures, or evidence documents' "$brief" \
+      "$kind brief lost the synthetic-identifier rule"
+    assert_grep 'not even in a file you expect to stay' "$brief" \
+      "$kind brief dropped the reason the rule applies to local-looking files"
+    assert_grep '123456789012' "$brief" \
+      "$kind brief lost the synthetic account-id example"
+    assert_grep 'user@example.com' "$brief" \
+      "$kind brief lost the synthetic email example"
+    assert_grep 'redact in place, keep the surrounding structure' "$brief" \
+      "$kind brief lost the instruction to redact evidence without destroying its shape"
+
+    # The scaffold must also practice the rule: no address outside the reserved example
+    # domains may appear in a generated brief, so the captain's own address cannot creep in.
+    if grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$brief" \
+      | grep -qvE '@example\.(com|org|net|invalid)$'; then
+      fail "$kind brief contains an email address outside the reserved example domains"
+    fi
+  done
+  pass "fm-brief.sh: every worker scaffold forbids real identifiers and supplies synthetic ones"
+}
+
+# --chrome selects which browser paragraph the Rules carry, and the two variants
+# must disagree about what the worker HAS while agreeing on the captain's rule.
+# The default must never instruct a worker to reach for the claude-in-chrome
+# tools, because bin/fm-spawn.sh launches that worker with claude's --no-chrome
+# and the tools are genuinely absent from its session.
+test_chrome_flag_selects_the_browser_paragraph() {
+  local home granted plain kind
+  home="$TMP_ROOT/chrome-flag-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-on-$kind" some-proj --scout --chrome \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind --chrome scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-off-$kind" some-proj --scout \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-on-$kind" some-proj --mode "$kind" --chrome \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind --chrome scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "chrome-off-$kind" some-proj --mode "$kind" \
+        >/dev/null 2>&1 || fail "fm-brief.sh $kind scaffold exited non-zero"
+    fi
+    granted="$home/data/chrome-on-$kind/brief.md"
+    plain="$home/data/chrome-off-$kind/brief.md"
+    assert_present "$granted" "$kind --chrome brief was not scaffolded"
+    assert_present "$plain" "$kind default brief was not scaffolded"
+
+    assert_grep "real, signed-in Chrome attached" "$granted" \
+      "$kind --chrome brief did not tell the worker it has the captain's browser"
+    assert_grep "NO browser at all" "$plain" \
+      "$kind default brief did not tell the worker the browser is absent"
+    # The escape hatch only belongs in the variant that has no browser.
+    assert_grep "blocked: needs a browser" "$plain" \
+      "$kind default brief gave the worker no way to ask for a browser"
+    if grep -q "blocked: needs a browser" "$granted"; then
+      fail "$kind --chrome brief told a worker that already has a browser to ask for one"
+    fi
+    # The two variants must actually differ, so neither can go quietly vacuous.
+    if diff -q "$granted" "$plain" >/dev/null 2>&1; then
+      fail "$kind --chrome and default briefs are identical; the flag changed nothing"
+    fi
+    # The captain's standing rule survives in both.
+    if grep -n 'chrome-devtools-axi' "$granted" | grep -qvi 'never'; then
+      fail "$kind --chrome brief mentions chrome-devtools-axi outside a prohibition"
+    fi
+    if grep -n 'chrome-devtools-axi' "$plain" | grep -qvi 'never'; then
+      fail "$kind default brief mentions chrome-devtools-axi outside a prohibition"
+    fi
+  done
+  pass "fm-brief.sh: --chrome selects the browser paragraph and the default never promises absent tools"
+}
+
+# --browser clean|fleet must produce briefs that differ from each other and from
+# the no-browser default, and each must carry the operating rules whose absence
+# fails silently: never override the session name or port, and answer a modal
+# with the very next command or lose the page.
+test_browser_grant_paragraphs() {
+  local home clean work none kind
+  home="$TMP_ROOT/browser-grant-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-clean-$kind" p --scout --browser clean >/dev/null 2>&1 \
+        || fail "scout --browser clean scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-work-$kind" p --scout --browser work --sites kept.example >/dev/null 2>&1 \
+        || fail "scout --browser work scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-none-$kind" p --scout >/dev/null 2>&1 \
+        || fail "scout default scaffold exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-clean-$kind" p --mode "$kind" --browser clean >/dev/null 2>&1 \
+        || fail "$kind --browser clean scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-work-$kind" p --mode "$kind" --browser work --sites kept.example >/dev/null 2>&1 \
+        || fail "$kind --browser work scaffold exited non-zero"
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "bg-none-$kind" p --mode "$kind" >/dev/null 2>&1 \
+        || fail "$kind default scaffold exited non-zero"
+    fi
+    clean="$home/data/bg-clean-$kind/brief.md"
+    work="$home/data/bg-work-$kind/brief.md"
+    none="$home/data/bg-none-$kind/brief.md"
+
+    # All three must be genuinely different documents.
+    if diff -q "$clean" "$work" >/dev/null 2>&1; then
+      fail "$kind clean and work briefs are identical; the grant changed nothing"
+    fi
+    if diff -q "$clean" "$none" >/dev/null 2>&1; then
+      fail "$kind clean and no-browser briefs are identical; the grant changed nothing"
+    fi
+
+    for brief in "$clean" "$work"; do
+      assert_grep "chrome-devtools-axi" "$brief" \
+        "granted brief did not name the fleet browser tool"
+      assert_grep "already set in your environment" "$brief" \
+        "granted brief did not warn against overriding the browser environment it was launched with"
+      assert_grep "VERY NEXT command must be" "$brief" \
+        "granted brief lost the modal-dialog rule that costs the page when broken"
+      # The extension is the captain's; a granted worker must be told not to use it.
+      if grep -n 'mcp__claude-in-chrome__' "$brief" | grep -qvi 'never'; then
+        fail "granted brief pointed a fleet worker at the captain's own browser"
+      fi
+    done
+
+    # Only the fleet grant describes serialisation; only clean warns about logins.
+    assert_grep "SEALED COMPARTMENT" "$work" \
+      "work brief did not tell the worker it is sealed inside the shared browser"
+    # Naming the grant lets a worker tell "outside my grant" apart from "not signed in".
+    assert_grep "these sites and no others: kept.example" "$work" \
+      "work brief did not name the site allowlist this worker was actually given"
+    assert_grep "NEVER use \`newpage\`" "$work" \
+      "work brief lost the newpage rule, which silently escapes the compartment"
+    assert_grep "carries NO logins" "$clean" \
+      "clean brief did not warn that a signed-out view is meaningless evidence"
+    if grep -q "SEALED COMPARTMENT" "$clean"; then
+      fail "clean brief claimed a compartment in the signed-in browser that it does not have"
+    fi
+  done
+  pass "fm-brief.sh: --browser clean and work carry their own grant and operating rules"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -945,7 +1137,10 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
-test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_browser_rule_drives_the_captains_real_chrome
+test_synthetic_identifiers_rule
+test_chrome_flag_selects_the_browser_paragraph
+test_browser_grant_paragraphs
 test_scout_lavish_line_follows_presentation_floor

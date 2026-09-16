@@ -249,32 +249,25 @@ UNIQB_PANE=$(grep '^herdr_pane_id=' "$UNIQB_META" | cut -d= -f2-)
   || fail "a crewmate launched from the 'firstmate' workspace must stay in it"
 pass "real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace"
 
-# --- 2b. presentation spaces ON: the projected child is created and bound
-#         UNDER the launcher's exact workspace, not collapsed into it ---------
+# --- 2b. presentation spaces ON from a launcher space that sits at the
+#         project's own checkout: grouping is refused and the worker stays in
+#         the launcher's exact workspace, because that space would otherwise
+#         become the project's closable group parent ------------------------
 
 spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRES_HOME" presU "$PROJ" --mode no-mistakes --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a presentation-enabled spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
 PRESU_META="$PRES_HOME/state/presU.meta"
 record_worktree "$PRESU_META"
 PRESU_PANE=$(grep '^herdr_pane_id=' "$PRESU_META" | cut -d= -f2-)
-PRESU_WS=$(workspace_of_pane "$PRESU_PANE")
-[ -n "$PRESU_WS" ] || fail "could not read presU's workspace"
-[ "$PRESU_WS" != "$WS_PRIMARY" ] \
-  || fail "a projected worker must get its own disposable workspace, not be collapsed into its parent"
-case "$(label_of_workspace "$PRESU_WS")" in
-  "└ "*" · p:"*) : ;;
-  *) fail "presU's workspace is not a presentation projection: '$(label_of_workspace "$PRESU_WS")'" ;;
-esac
-PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
-[ -f "$PRESU_JOURNAL" ] || fail "a projected spawn did not leave its presentation journal"
-[ "$(journal_field "$PRESU_JOURNAL" version)" = 2 ] \
-  || fail "the projection did not publish an exact restart binding"$'\n'"$(cat "$PRESU_JOURNAL")"
-[ "$(journal_field "$PRESU_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY" ] \
-  || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
-[ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
-  || fail "the projection journal does not name its own workspace"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+[ "$(workspace_of_pane "$PRESU_PANE")" = "$WS_PRIMARY" ] \
+  || fail "a worker refused grouping must stay in the launcher's exact workspace ($WS_PRIMARY)"
+grep -F "launching space its project parent" "$SPAWN_ERR" >/dev/null \
+  || fail "the refused grouping did not explain why the worker stayed in its launching space"$'\n'"$(cat "$SPAWN_ERR")"
+[ ! -e "$PRES_HOME/state/presU.herdr-presentation" ] \
+  || fail "a refused grouping left a presentation journal behind"
+[ "$(label_of_workspace "$WS_PRIMARY")" = firstmate ] || fail "a refused grouping relabeled the launcher's workspace"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a presentation-enabled spawn stole focus from the captain's workspace"
+pass "real herdr E2E: a presentation-enabled worker whose launcher sits at its project's checkout stays in that exact workspace without a journal or focus change"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -324,33 +317,27 @@ pass "real herdr E2E: with two 'firstmate' workspaces, a worker spawned from ins
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the in-pane spawn stole focus from the captain's workspace"
 pass "real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved"
 
-# --- 3b. presentation spaces ON with a duplicated parent label: the projection
-#         still hangs off the launcher's exact workspace ---------------------
+# --- 3b. presentation spaces ON from the second 'firstmate' workspace: the
+#         project's checkout is held by the first one, which hosts Firstmate
+#         task tabs, so grouping is refused and the worker stays in the
+#         launcher's exact workspace while that sibling stays untouched -----
 
 spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRES_HOME" presD "$PROJ" --mode no-mistakes --yolo off
-[ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under a duplicated parent label failed"$'\n'"$(cat "$SPAWN_ERR")"
+[ "$SPAWN_RC" -eq 0 ] || fail "a presentation-enabled spawn under a duplicated home label failed"$'\n'"$(cat "$SPAWN_ERR")"
 PRESD_META="$PRES_HOME/state/presD.meta"
 record_worktree "$PRESD_META"
 PRESD_PANE=$(grep '^herdr_pane_id=' "$PRESD_META" | cut -d= -f2-)
-PRESD_WS=$(workspace_of_pane "$PRESD_PANE")
-[ -n "$PRESD_WS" ] || fail "could not read presD's workspace"
-PRESD_JOURNAL="$PRES_HOME/state/presD.herdr-presentation"
-[ "$(journal_field "$PRESD_JOURNAL" version)" = 2 ] \
-  || fail "the duplicate-label projection did not publish a version 2 binding"$'\n'"$(cat "$PRESD_JOURNAL" 2>/dev/null)"
-[ "$(journal_field "$PRESD_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY_DUP" ] \
-  || fail "the duplicate-label projection journal did not bind the launcher's exact parent workspace"
-[ "$PRESD_WS" != "$WS_PRIMARY" ] && [ "$PRESD_WS" != "$WS_PRIMARY_DUP" ] \
-  || fail "a projected worker must not be collapsed into either same-labeled parent workspace"
-PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP" --arg child "$PRESD_WS" '
-  [range(0; (.result.workspaces | length)) as $i
-    | {i: $i, id: .result.workspaces[$i].workspace_id}]
-  | ((map(select(.id == $child)) | .[0].i) - (map(select(.id == $dup)) | .[0].i))')
-[ "$PRESD_ORDER" = 1 ] \
-  || fail "the projected child should sit immediately after the launcher's own workspace, offset was '$PRESD_ORDER'"
+[ "$(workspace_of_pane "$PRESD_PANE")" = "$WS_PRIMARY_DUP" ] \
+  || fail "a worker refused grouping must stay in the launcher's exact workspace ($WS_PRIMARY_DUP)"
+grep -F "Firstmate home space" "$SPAWN_ERR" >/dev/null \
+  || fail "the refusal to group under a Firstmate home space was not explained"$'\n'"$(cat "$SPAWN_ERR")"
+[ ! -e "$PRES_HOME/state/presD.herdr-presentation" ] \
+  || fail "a refused grouping left a presentation journal behind"
 [ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
-  || fail "the other same-labeled workspace was mutated by a projected spawn"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched"
+  || fail "the other same-labeled workspace was mutated by a presentation-enabled spawn"
+[ "$(label_of_workspace "$WS_PRIMARY")" = firstmate ] || fail "the other same-labeled workspace was renamed"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a presentation-enabled spawn stole focus from the captain's workspace"
+pass "real herdr E2E: with a duplicated home label, a worker is never grouped under a Firstmate home space; it stays in the launcher's exact workspace and the sibling is untouched"
 
 # --- 4. duplicate label with NO launcher identity refuses before publishing --
 

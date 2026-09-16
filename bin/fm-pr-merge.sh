@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Merge a task's PR or MR after recording pr= and any available pr_head= through
+# Merge a task's pull request or merge request after recording pr= and any
+# available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
@@ -23,7 +24,7 @@
 # name, still requires every other check green, and still binds the head. It is
 # refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# succeeded, or on CodeCommit, which accepts no extra merge argument. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -66,7 +67,32 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Before either forge merge, the task's existing per-task control lock
+# CodeCommit is merged through the AWS CLI and refused unless every pre-merge
+# condition holds, each read live at merge time rather than taken from recorded
+# metadata: the pull request is open, its approval rules evaluate as approved,
+# and the merge AWS itself computes for the chosen method reports no conflicts.
+# Every failing condition is reported, not just the first. The verified head is
+# then passed as --source-commit-id, so a push that lands between that read and
+# the merge fails the merge instead of landing commits nothing verified, exactly
+# as --sha does on GitLab.
+#
+# CodeCommit closes a pull request whether it was merged or abandoned, so its
+# status can never be the merge proof. The only accepted proof is
+# mergeMetadata.isMerged reading true on the one target whose repository matches
+# the URL; every other outcome refuses rather than reporting a landed merge.
+#
+# The merge method defaults to squash to match the GitHub default, and --merge
+# and --fast-forward select the three-way and fast-forward APIs. CodeCommit has
+# no rebase merge, so --rebase is refused rather than silently mapped onto a
+# method the caller did not ask for. No other extra argument is accepted on this
+# path at all: the AWS CLI would read one as its own option, and --profile or
+# --region would override the very credentials and account the URL and the
+# repository's remote resolved.
+#
+# The AWS profile is read from the task worktree's own git remote by
+# bin/fm-pr-check.sh, which this script runs before any forge call.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
@@ -142,6 +168,10 @@ PR_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
+PR_REGION=$FM_PR_REGION
+# CodeCommit addresses a repository by its bare name, captured here so a later
+# parse of another URL cannot change what this run merges.
+PR_REPO_NAME=$FM_PR_PATH
 # glab resolves the instance from the project URL passed to -R, so the host is
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
@@ -174,6 +204,10 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = codecommit ]; then
+  echo "error: --allow-red does not apply to CodeCommit, which accepts no extra merge argument" >&2
   exit 2
 fi
 
@@ -374,10 +408,95 @@ if [ "$PROVIDER" = github ]; then
   fi
 fi
 
+# The AWS CLI is invoked with the region and profile this task resolved rather
+# than any ambient default, so neither AWS_PROFILE nor a configured default
+# region can redirect a merge at another account.
+codecommit_aws() {
+  aws codecommit "$@" --region "$PR_REGION" --profile "$CODECOMMIT_PROFILE" --output json
+}
+
+# Map the caller's merge method onto CodeCommit's three merge APIs. CodeCommit
+# has no rebase merge, so --rebase is refused rather than mapped onto a method
+# the caller did not ask for.
+CODECOMMIT_MERGE_API=
+CODECOMMIT_MERGE_OPTION=
+codecommit_select_merge_method() {
+  local method=$1
+  case "$method" in
+    ''|--squash)
+      CODECOMMIT_MERGE_API=merge-pull-request-by-squash
+      CODECOMMIT_MERGE_OPTION=SQUASH_MERGE
+      ;;
+    --merge)
+      CODECOMMIT_MERGE_API=merge-pull-request-by-three-way
+      CODECOMMIT_MERGE_OPTION=THREE_WAY_MERGE
+      ;;
+    --fast-forward)
+      CODECOMMIT_MERGE_API=merge-pull-request-by-fast-forward
+      CODECOMMIT_MERGE_OPTION=FAST_FORWARD_MERGE
+      ;;
+    *)
+      printf 'error: CodeCommit has no %s merge; use --squash, --merge, or --fast-forward\n' \
+        "${method#--}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# CodeCommit needs the same two tools for the same reason, plus the AWS profile
+# that selects its account. Reported together and before anything is recorded.
+CODECOMMIT_PROFILE=
+CODECOMMIT_CALLER_METHOD=
+if [ "$PROVIDER" = codecommit ]; then
+  CODECOMMIT_MISSING=
+  command -v aws >/dev/null 2>&1 || CODECOMMIT_MISSING="the AWS CLI"
+  if ! command -v jq >/dev/null 2>&1; then
+    CODECOMMIT_MISSING="${CODECOMMIT_MISSING:+$CODECOMMIT_MISSING and }jq"
+  fi
+  if [ -n "$CODECOMMIT_MISSING" ]; then
+    echo "error: merging a CodeCommit pull request requires $CODECOMMIT_MISSING on PATH" >&2
+    exit 1
+  fi
+  # Only a merge method may be passed through here. The AWS CLI would read any
+  # other extra argument as its own option, and --profile or --region would
+  # override the account this task resolved from the URL and the remote.
+  for cc_arg in "$@"; do
+    case "$cc_arg" in
+      --squash|--merge|--rebase|--fast-forward)
+        if [ -n "$CODECOMMIT_CALLER_METHOD" ]; then
+          echo "error: extra merge arguments must name at most one merge method" >&2
+          exit 1
+        fi
+        CODECOMMIT_CALLER_METHOD=$cc_arg
+        ;;
+      *)
+        printf 'error: a CodeCommit merge accepts only --squash, --merge, or --fast-forward, not %s\n' \
+          "$cc_arg" >&2
+        exit 1
+        ;;
+    esac
+  done
+  codecommit_select_merge_method "$CODECOMMIT_CALLER_METHOD" || exit 1
+  CODECOMMIT_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  CODECOMMIT_REMOTE=
+  if [ -n "$CODECOMMIT_WORKTREE" ] && [ -d "$CODECOMMIT_WORKTREE" ]; then
+    CODECOMMIT_REMOTE=$(git -C "$CODECOMMIT_WORKTREE" remote get-url origin 2>/dev/null || true)
+  fi
+  if [ -z "$CODECOMMIT_REMOTE" ]; then
+    echo "error: could not read the origin remote of the task worktree, so the AWS profile for $URL is unknown" >&2
+    exit 1
+  fi
+  if ! fm_pr_codecommit_remote_profile "$CODECOMMIT_REMOTE" "$PR_REPO_NAME" "$PR_REGION"; then
+    echo "error: the origin remote of the task worktree names no AWS profile for repository $PR_REPO_NAME in $PR_REGION" >&2
+    exit 1
+  fi
+  CODECOMMIT_PROFILE=$FM_PR_CREDENTIAL
+fi
+
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = codecommit ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -1121,7 +1240,152 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Pre-merge conditions for a CodeCommit pull request, read live at merge time.
+# Sets FM_PR_MERGE_HEAD to the verified head and FM_PR_CC_TITLE to the title the
+# squash commit will carry, and returns non-zero after reporting every condition
+# that failed rather than only the first.
+FM_PR_CC_TITLE=
+codecommit_verify_mergeable() {
+  local json fields line evaluation approved conflicts mergeable
+  local total=0 named=0 refusals=''
+  local status='' revision='' live_head='' destination='' repo=''
+
+  if ! json=$(codecommit_aws get-pull-request --pull-request-id "$PR_NUMBER" 2>/dev/null) \
+    || [ -z "$json" ]; then
+    echo "error: could not read the CodeCommit pull request state before merging" >&2
+    return 1
+  fi
+  # One named field per line, read from the single target whose repository is
+  # the one the URL named. A pull request with no such target, or with more than
+  # one, makes jq fail rather than letting another repository's target answer.
+  if ! fields=$(printf '%s' "$json" | jq -r --arg repo "$PR_REPO_NAME" '
+      if type == "object" then
+        (.pullRequest // error("no pull request")) as $pr
+        | ([$pr.pullRequestTargets[] | select(.repositoryName == $repo)]
+           | if length == 1 then .[0] else error("no single target") end) as $t
+        | "status=" + (($pr.pullRequestStatus // "") | tostring),
+          "revision=" + (($pr.revisionId // "") | tostring),
+          "title=" + (($pr.title // "") | tostring),
+          "repo=" + (($t.repositoryName // "") | tostring),
+          "head=" + (($t.sourceCommit // "") | tostring),
+          "destination=" + (($t.destinationReference // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the CodeCommit pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      status=*) status=${line#status=} ;;
+      revision=*) revision=${line#revision=} ;;
+      title=*) FM_PR_CC_TITLE=${line#title=} ;;
+      repo=*) repo=${line#repo=} ;;
+      head=*) live_head=${line#head=} ;;
+      destination=*) destination=${line#destination=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  # Every field named exactly once and no unnamed line: a title carrying a
+  # newline would split into a line no name matches, so it is refused here
+  # rather than silently truncated into a value a check could accept.
+  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ]; then
+    echo "error: could not read the CodeCommit pull request state before merging" >&2
+    return 1
+  fi
+  if [ "$repo" != "$PR_REPO_NAME" ]; then
+    echo "error: the CodeCommit pull request does not target repository $PR_REPO_NAME" >&2
+    return 1
+  fi
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the CodeCommit pull request head commit before merging" >&2
+    return 1
+  fi
+  # A force-push moves the head and leaves the recorded value behind, so the
+  # disagreement is reported and the live head is what gets verified and merged.
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  [ "$status" = OPEN ] \
+    || refusals="$refusals  - pullRequestStatus is \"${status:-unreadable}\", not OPEN
+"
+
+  # Approval rules are evaluated against the exact revision just read, so an
+  # approval granted for an earlier revision cannot authorize this merge.
+  if [ -z "$revision" ]; then
+    refusals="$refusals  - the revision id could not be read, so approval rules cannot be evaluated
+"
+  elif ! evaluation=$(codecommit_aws evaluate-pull-request-approval-rules \
+      --pull-request-id "$PR_NUMBER" --revision-id "$revision" 2>/dev/null) \
+    || ! approved=$(printf '%s' "$evaluation" | jq -r \
+      'if (.evaluation.approved | type) == "boolean" then .evaluation.approved else error("unreadable") end' \
+      2>/dev/null); then
+    refusals="$refusals  - the approval rule evaluation could not be read
+"
+  elif [ "$approved" != true ]; then
+    refusals="$refusals  - the approval rules evaluate as \"$approved\", not approved
+"
+  fi
+
+  # The conflict read asks for the same merge method the merge itself will use,
+  # so a combination that is clean one way and conflicted another is judged the
+  # way it will actually be merged.
+  if ! conflicts=$(codecommit_aws get-merge-conflicts \
+      --repository-name "$PR_REPO_NAME" \
+      --source-commit-specifier "$live_head" \
+      --destination-commit-specifier "$destination" \
+      --merge-option "$CODECOMMIT_MERGE_OPTION" 2>/dev/null) \
+    || ! mergeable=$(printf '%s' "$conflicts" | jq -r \
+      'if (.mergeable | type) == "boolean" then .mergeable else error("unreadable") end' \
+      2>/dev/null); then
+    refusals="$refusals  - the merge conflict state could not be read
+"
+  elif [ "$mergeable" != true ]; then
+    refusals="$refusals  - the ${CODECOMMIT_MERGE_OPTION} of $live_head into ${destination:-the destination} reports conflicts
+"
+  fi
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open, approved, and conflict-free at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
+}
+
+# The only accepted proof that a CodeCommit merge landed. The status is
+# deliberately not consulted: CodeCommit closes a pull request whether it was
+# merged or abandoned, so only mergeMetadata.isMerged distinguishes the two.
+codecommit_confirm_merged() {
+  local json merged
+  if ! json=$(codecommit_aws get-pull-request --pull-request-id "$PR_NUMBER" 2>/dev/null) \
+    || [ -z "$json" ]; then
+    printf 'actionable: CodeCommit accepted the merge for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! merged=$(printf '%s' "$json" | jq -r --arg repo "$PR_REPO_NAME" \
+    '[.pullRequest.pullRequestTargets[]
+      | select(.repositoryName == $repo)
+      | .mergeMetadata.isMerged]
+     | if length == 1 and (.[0] | type) == "boolean" then .[0] else error("no single target") end' \
+    2>/dev/null); then
+    printf 'actionable: CodeCommit accepted the merge for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  [ "$merged" = true ]
+}
+
+# Record before any forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0
@@ -1225,6 +1489,54 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  codecommit)
+    codecommit_verify_mergeable || exit 1
+    # --source-commit-id binds the merge to the head this run verified, so a
+    # push that lands in between is refused by CodeCommit instead of merged
+    # unverified. The squash and three-way APIs build a new commit, so they
+    # carry the pull request's own title as its message; the fast-forward API
+    # creates no commit and takes none. The title is forge data and may begin
+    # with "-", which the AWS CLI reads as another option when the value is a
+    # separate argument, so it is carried in the single-token form that is
+    # always an explicit value.
+    codecommit_merge_args=()
+    if [ "$CODECOMMIT_MERGE_API" != merge-pull-request-by-fast-forward ]; then
+      codecommit_merge_args=(--commit-message="$FM_PR_CC_TITLE")
+    fi
+    # The away record is locked first, so this last presence and authority read
+    # and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    merge_status=0
+    codecommit_aws "$CODECOMMIT_MERGE_API" \
+      --pull-request-id "$PR_NUMBER" \
+      --repository-name "$PR_REPO_NAME" \
+      --source-commit-id "$FM_PR_MERGE_HEAD" \
+      "${codecommit_merge_args[@]+"${codecommit_merge_args[@]}"}" >/dev/null || merge_status=$?
+    if [ "$merge_status" -ne 0 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      exit "$merge_status"
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    codecommit_confirm_rc=0
+    codecommit_confirm_merged || codecommit_confirm_rc=$?
+    if [ "$codecommit_confirm_rc" -eq 2 ]; then
+      exit 0
+    fi
+    if [ "$codecommit_confirm_rc" -ne 0 ]; then
+      printf 'error: CodeCommit accepted the merge command for %s but the pull request does not read back as merged; the merge poll remains armed\n' \
+        "$URL" >&2
+      exit 1
+    fi
+    printf 'verified: %s is merged\n' "$URL"
     ;;
   *)
     echo "error: invalid PR merge request" >&2

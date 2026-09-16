@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--chrome]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--chrome]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -32,6 +32,24 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --browser states which browser grant bin/fm-spawn.sh gives this worker, and
+#   must match the --browser and --sites passed there. --sites names that
+#   worker's site allowlist in the brief, so it can tell a site outside its
+#   grant apart from a work browser that is not signed in. `clean` is a throwaway profile with
+#   no logins; `fleet` is the captain's one shared signed-in profile, which
+#   Chrome's profile lock hands to one worker at a time. It only changes the
+#   Rules' browser paragraph, which then carries the operating rules that
+#   actually bite: the session name and port are already set and must not be
+#   overridden, a modal dialog must be answered by the very next command or the
+#   page is destroyed, and the worker must never stop another session.
+#   --chrome states that this worker WILL be launched with the captain's real,
+#   signed-in Chrome attached, and must match the --chrome passed to
+#   bin/fm-spawn.sh. It only changes which browser paragraph the Rules carry:
+#   a granted brief points at the `mcp__claude-in-chrome__*` tools the worker
+#   actually has, while the default brief says the browser is absent and tells
+#   the worker to stop and ask rather than reaching for tools that are not
+#   there. The captain's standing rule - his real Chrome, never the sandboxed
+#   chrome-devtools-axi - is carried by both.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -95,7 +113,6 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -123,6 +140,9 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+CHROME=0
+BROWSER=
+BROWSER_SITES=
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -135,6 +155,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      browser) BROWSER=$a ;;
+      sites) BROWSER_SITES=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +166,11 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --chrome) CHROME=1 ;;
+    --browser) want_value=browser ;;
+    --browser=*) BROWSER=${a#--browser=} ;;
+    --sites) want_value=sites ;;
+    --sites=*) BROWSER_SITES=${a#--sites=} ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -176,6 +203,20 @@ elif [ "$MODE_SET" -eq 1 ]; then
 fi
 ID=${POS[0]}
 
+case "$BROWSER" in
+  ''|clean|work) ;;
+  *) echo "error: --browser must be clean or work, matching the --browser passed to bin/fm-spawn.sh" >&2; exit 1 ;;
+esac
+if [ -n "$BROWSER" ] && [ "$CHROME" -eq 1 ]; then
+  echo "error: --chrome and --browser are different browsers and cannot be combined" >&2
+  exit 1
+fi
+# Naming the sites in the brief lets a worker tell "this site is not in my grant"
+# apart from "the work browser is not signed in", which are different reports.
+if [ -n "$BROWSER_SITES" ] && [ "$BROWSER" != work ]; then
+  echo "error: --sites applies only to --browser work" >&2
+  exit 1
+fi
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
@@ -316,6 +357,76 @@ fi
 
 REPO=${POS[1]}
 
+# The browser paragraph, stated once for both the ship and scout Rules. Which
+# variant is written must match how bin/fm-spawn.sh launches the worker: that
+# script passes claude's --chrome only for a --chrome spawn and --no-chrome
+# otherwise, so a default brief that told the worker to reach for
+# `mcp__claude-in-chrome__*` would be naming tools its session does not have.
+# The captain's standing rule holds in both variants: his real, signed-in Chrome
+# through the extension, never the sandboxed chrome-devtools-axi, whose separate
+# empty browser carries none of his logins and has already produced one wrong
+# "not signed in" report.
+if [ -n "$BROWSER" ]; then
+  # A granted worker already HAS its browser: the launch set a unique session
+  # name and an explicit port for it. Both of those failures are silent - two
+  # workers on one session name quietly read each other's pages, and the
+  # default hashed port collides across lanes - so the rule here is "do not
+  # override", not "remember to set".
+  if [ "$BROWSER" = work ]; then
+    BROWSER_SITE_LINE="the sites this task was given"
+    [ -z "$BROWSER_SITES" ] || BROWSER_SITE_LINE="these sites and no others: $BROWSER_SITES"
+    BROWSER_WHICH="   Your tab is a SEALED COMPARTMENT inside the captain's work browser. It already holds his
+   real logged-in session for $BROWSER_SITE_LINE - you are genuinely
+   signed out of every other site, which is deliberate. Other workers have their own compartments
+   in the same browser and cannot see yours.
+   Treat it as the captain's own account: read freely, but anything that sends, buys, posts,
+   deletes, or changes an account setting stops and asks. Never sign in or out of anything: a
+   logout would end the session for everyone using that browser.
+   If your site presents as signed out, do NOT try to sign in - append
+   \`blocked: work browser is not signed in to <site>\` and stop."
+  else
+    BROWSER_WHICH="   You have your own throwaway browser. It carries NO logins, so any page behind a
+   sign-in will show you a signed-out view - that result is meaningless as evidence, and if the
+   task needs a signed-in session, append \`blocked: needs the signed-in work browser\` and stop
+   rather than reporting what a logged-out browser showed."
+  fi
+  BROWSER_RULE="   Drive the browser with \`chrome-devtools-axi\`. Never the \`mcp__claude-in-chrome__*\` tools:
+   those drive the captain's own browser and are reserved for him.
+$BROWSER_WHICH
+   Your session name, port and browser are already set in your environment. Never set, change or
+   unset any \`CHROME_DEVTOOLS_AXI_*\` variable, and never run \`chrome-devtools-axi stop\` for any
+   session but your own - other workers are using theirs, and a wrong session name silently mixes
+   your pages up with theirs.
+   Navigate with \`open <url>\`, which moves the tab you are already on. NEVER use \`newpage\`: it
+   opens the new tab OUTSIDE your compartment, in the shared browser, which both breaks your
+   isolation and leaves you with no page selected. If you lose your page, run \`pages\` and
+   \`selectpage\` the one whose title names this task.
+   If a command reports an open dialog, the VERY NEXT command must be \`dialog accept\` or
+   \`dialog dismiss\`. Any other command in between destroys the page unrecoverably.
+   File upload is broken in the current version; do not build the task around it.
+   Open a browser only when the task needs real application behavior - never to preview or check
+   your own HTML output, and never start a web server to view your own work; verify those by
+   reading the file and by static checks."
+elif [ "$CHROME" -eq 1 ]; then
+  BROWSER_RULE="   This session is launched with the captain's real, signed-in Chrome attached: drive it
+   with the \`mcp__claude-in-chrome__*\` tools. Never \`chrome-devtools-axi\`, which opens a
+   separate empty browser carrying none of his logins.
+   You are borrowing the captain's own logged-in browser, so treat it as his: read freely,
+   but anything that sends, buys, posts, deletes, or changes an account setting stops and asks.
+   Open a browser only when the task needs that signed-in session or real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks."
+else
+  BROWSER_RULE="   This session is launched with NO browser at all, so neither the \`mcp__claude-in-chrome__*\`
+   tools nor a \`chrome-devtools-axi\` browser of your own is available to you. Never reach for
+   either: the extension drives the captain's own browser and is reserved for him, and an
+   unrequested browser costs about 0.65GB on a machine that is already short of memory.
+   If this task genuinely needs a browser, append \`blocked: needs a browser\` and stop, saying
+   whether it needs a signed-in session; firstmate relaunches you with the right one.
+   Open a browser only when the task needs real application behavior -
+   never to preview or check your own HTML output, and never start a web server to view your own
+   work; verify those by reading the file and by static checks."
+fi
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -380,7 +491,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -391,7 +503,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. When you know when the wait clears, say so in the line with
    \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
@@ -413,6 +525,13 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put real identifiers into tests, fixtures, or evidence documents: no real account
+   numbers, credentials, API keys, client or customer names, internal hostnames, ARNs, or
+   personal data such as names and email addresses - not even in a file you expect to stay
+   local, because branches get pushed. Use synthetic values that keep the shape and drop the
+   content (\`123456789012\`, \`user@example.com\`, an invented client name). When you paste real
+   output as proof, redact in place, keep the surrounding structure, and say at the top that
+   identifiers were redacted so nobody later mistakes scrubbed evidence for fabricated evidence.
 
 $INBOX_SECTION
 
@@ -436,16 +555,18 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     ;;
   local-only)
     SETUP2=""
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 cat > "$BRIEF" <<EOF
@@ -467,7 +588,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -481,8 +603,8 @@ $RULE1
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
-   firstmate then leaves your idle pane alone and rechecks it on a long
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
+   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
@@ -502,6 +624,13 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put real identifiers into tests, fixtures, or evidence documents: no real account
+   numbers, credentials, API keys, client or customer names, internal hostnames, ARNs, or
+   personal data such as names and email addresses - not even in a file you expect to stay
+   local, because branches get pushed. Use synthetic values that keep the shape and drop the
+   content (\`123456789012\`, \`user@example.com\`, an invented client name). When you paste real
+   output as proof, redact in place, keep the surrounding structure, and say at the top that
+   identifiers were redacted so nobody later mistakes scrubbed evidence for fabricated evidence.
 
 $INBOX_SECTION
 
