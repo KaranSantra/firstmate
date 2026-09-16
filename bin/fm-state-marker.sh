@@ -51,6 +51,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 CREW_STATE_BIN="${FM_STATE_MARKER_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 LABELS_BIN="${FM_STATE_MARKER_LABELS_BIN:-$SCRIPT_DIR/fm-model-labels.sh}"
 INTERVAL="${FM_STATE_MARKER_INTERVAL:-60}"
@@ -66,6 +68,10 @@ usage() {
 
 record_path() {  # <id>
   printf '%s/%s.state-marker' "$STATE" "$1"
+}
+
+update_lock_path() {  # <id>
+  printf '%s/.state-marker-%s.lock' "$STATE" "$1"
 }
 
 now_epoch() {
@@ -172,7 +178,7 @@ write_record() {  # <id> <epoch> <marker>
 }
 
 cmd_update() {  # <id>
-  local id=${1:-} now marker shown target
+  local id=${1:-} now marker shown target lock
   case "$id" in
     '' | */* | .*) die "update needs a task id" 2 ;;
   esac
@@ -180,9 +186,12 @@ cmd_update() {  # <id>
   # and a remote secondmate off this path entirely rather than merely off Herdr.
   target=$(herdr_target "$id")
   [ -n "$target" ] || return 0
+  lock=$(update_lock_path "$id")
+  fm_lock_try_acquire "$lock" || return 0
   read_record "$id"
   now=$(now_epoch)
   if [ "$REC_AT" -gt 0 ] && [ $((now - REC_AT)) -lt "$INTERVAL" ]; then
+    fm_lock_release "$lock" || true
     return 0
   fi
   marker=$(marker_for "$id")
@@ -191,6 +200,7 @@ cmd_update() {  # <id>
     shown=$marker
   fi
   write_record "$id" "$now" "$shown"
+  fm_lock_release "$lock" || true
 }
 
 cmd_clear() {  # <id>

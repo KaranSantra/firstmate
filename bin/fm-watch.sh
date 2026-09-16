@@ -2298,6 +2298,16 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    # Refresh this lane's sidebar marker naming what currently holds it. The
+    # helper, not this loop, owns the cadence: it reads pipeline state at most
+    # once per FM_STATE_MARKER_INTERVAL per task and shows the last known marker
+    # in between, which is what keeps bin/fm-classify-lib.sh's "never every
+    # wake" cost guard intact while this loop still runs every poll. Cosmetic
+    # and silent: a failure never changes triage below.
+    if [ -n "$task" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null 2>&1 &
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
@@ -2337,14 +2347,6 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    # Refresh this lane's sidebar marker naming what currently holds it. The
-    # helper, not this loop, owns the cadence: it reads pipeline state at most
-    # once per FM_STATE_MARKER_INTERVAL per task and shows the last known marker
-    # in between, which is what keeps bin/fm-classify-lib.sh's "never every
-    # wake" cost guard intact while this loop still runs every poll. Cosmetic
-    # and silent: a failure never changes triage below.
-    [ -z "$task" ] || FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null 2>&1 || true
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

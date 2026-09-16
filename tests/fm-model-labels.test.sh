@@ -279,6 +279,22 @@ assert_contains "$(check_file "$STATES_LONG")" "symbol plus at most two characte
   "check names the horizontal-space limit it enforced"
 pass "marker: an over-long glyph is refused with the reason"
 
+STATES_LETTERS="$TMP_ROOT/states-letters.toml"
+cat > "$STATES_LETTERS" <<'TOML'
+[meta]
+schema = 1
+
+[states.glyphs]
+review = "abc"
+TOML
+rc=0
+out=$(marker review FM_MODEL_LABELS_FILE="$STATES_LETTERS") || rc=$?
+expect_code 1 "$rc" "an all-letter glyph fails the marker"
+assert_equals "" "$out" "an all-letter glyph shows nothing"
+assert_contains "$(check_file "$STATES_LETTERS")" "must begin with a symbol or emoji" \
+  "check names the required marker prefix"
+pass "marker: a non-symbol glyph is refused with the reason"
+
 STATES_UNKNOWN="$TMP_ROOT/states-unknown.toml"
 cat > "$STATES_UNKNOWN" <<'TOML'
 [meta]
