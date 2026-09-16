@@ -453,6 +453,102 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+# A fast-forward merge that leaves the merged source branch in place puts two
+# branches on origin's HEAD commit. On a remote that advertises no HEAD symref
+# - AWS CodeCommit is the field case - git can only guess the default branch by
+# matching HEAD's commit, so it finds two answers and `remote set-head --auto`
+# refuses. Every candidate is nonetheless AT origin's current HEAD, so an
+# origin/HEAD already recorded for one of them is a corroborated answer, not a
+# guess, and the pool must launch instead of locking the project out until
+# someone deletes a branch.
+strip_origin_head_symref() {  # <case-dir>
+  git --git-dir="$1/origin.git" update-ref --no-deref HEAD \
+    "$(git --git-dir="$1/origin.git" rev-parse HEAD)"
+}
+
+add_branch_at_origin_head() {  # <case-dir> <branch>
+  git --git-dir="$1/origin.git" update-ref "refs/heads/$2" \
+    "$(git --git-dir="$1/origin.git" rev-parse HEAD)"
+}
+
+test_ambiguous_symrefless_default_resolves_from_recorded_head() {
+  local rec id out status current advertised
+  id='pool-ambiguous-head-r14'
+  rec=$(make_case ambiguous-head "$id")
+  read_case_record "$rec"
+  add_branch_at_origin_head "$CASE_DIR" 'fm/merged-source'
+  strip_origin_head_symref "$CASE_DIR"
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+  advertised=$(git -C "$POOL_DIR" ls-remote --symref origin HEAD)
+  case $advertised in
+    *'ref: '*) fail "fixture still advertises a HEAD symref, so it does not reproduce the field remote" ;;
+  esac
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "spawn should launch when several branches share origin's HEAD but origin/HEAD is already recorded"$'\n'"$out"
+  current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn did not refresh to current origin/$DEFAULT_BRANCH through the ambiguous remote"
+  [ "$current" != "$INITIAL_SHA" ] || fail "fixture did not prove the pool base was stale"
+  [ "$(git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "refs/remotes/origin/$DEFAULT_BRANCH" ] \
+    || fail "spawn did not leave origin/HEAD recording the resolved default branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# advertised HEAD (no symref):\n%s\n' "$advertised"
+    printf '# observed ambiguous-head spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "an ambiguous symref-less remote resolves from the recorded origin/HEAD instead of blocking the pool"
+}
+
+test_advertised_symref_outranks_a_shared_tip_and_a_stale_record() {
+  local rec id out status current
+  id='pool-symref-default-r15'
+  rec=$(make_case symref-default "$id")
+  read_case_record "$rec"
+  add_branch_at_origin_head "$CASE_DIR" 'fm/merged-source'
+  # A recorded origin/HEAD naming the wrong branch must not survive a remote
+  # that states its own default: the symref is the authoritative answer.
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD 'refs/remotes/origin/fm/merged-source'
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still resolve a remote that advertises a HEAD symref"$'\n'"$out"
+  current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn did not refresh to the symref's branch"
+  [ "$(git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "refs/remotes/origin/$DEFAULT_BRANCH" ] \
+    || fail "spawn kept a recorded origin/HEAD that the remote's own symref contradicts"
+  pass "an advertised HEAD symref still decides the default branch, over a shared tip and a stale record"
+}
+
+test_ambiguous_symrefless_default_without_a_record_refuses_pool() {
+  local rec id out status before recorded
+  for recorded in unset contradicted; do
+    id="pool-ambiguous-unrecorded-${recorded}-r16"
+    rec=$(make_case "ambiguous-unrecorded-$recorded" "$id")
+    read_case_record "$rec"
+    add_branch_at_origin_head "$CASE_DIR" 'fm/merged-source'
+    strip_origin_head_symref "$CASE_DIR"
+    if [ "$recorded" = contradicted ]; then
+      # Names a branch that is not among the candidates at origin's HEAD, so the
+      # record is stale or wrong and carries no authority over the live remote.
+      git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD 'refs/remotes/origin/retired-trunk'
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] \
+      || fail "spawn guessed a default branch with an ambiguous remote and no trustworthy record ($recorded)"
+    assert_contains "$out" "could not resolve origin's current default branch" \
+      "spawn did not clearly refuse an undeterminable default branch ($recorded)"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn moved HEAD after failing to resolve the default branch ($recorded)"
+    pass "an ambiguous remote with no trustworthy recorded default ($recorded) still refuses the pooled worktree"
+  done
+}
+
 # A slot left on a stale submodule pin is the field failure this diagnosis exists
 # for: a refresh moved the superproject and left the submodule behind, so the
 # refusal fires a spawn later, on a slot whose own `git status` looks clean to the
@@ -751,6 +847,9 @@ test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
+test_ambiguous_symrefless_default_resolves_from_recorded_head
+test_advertised_symref_outranks_a_shared_tip_and_a_stale_record
+test_ambiguous_symrefless_default_without_a_record_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work

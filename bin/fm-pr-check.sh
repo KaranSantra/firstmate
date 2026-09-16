@@ -3,8 +3,17 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and an AWS CodeCommit
+# console pull request URL are all accepted, including a merge request on a
+# self-hosted GitLab instance.
+#
+# A CodeCommit poll additionally needs the local AWS profile that selects its
+# account's credentials, which no URL carries. It is read out of the task
+# worktree's own git remote, where the git-remote-codecommit helper records it,
+# and never guessed: the default credential chain is exactly what that profile
+# exists to override, so falling back to it would arm a watch that can only
+# fail. The profile is stored in the same private sidecar as the identity and
+# is never interpolated into shell source.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -35,6 +44,7 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+REGION=$FM_PR_REGION
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -60,24 +70,108 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# The same reasoning applies to CodeCommit, which needs both tools and, unlike
+# the other two forges, a profile that only the repository's own remote records.
+CREDENTIAL=
+if [ "$PROVIDER" = codecommit ]; then
+  CODECOMMIT_MISSING=
+  command -v aws >/dev/null 2>&1 || CODECOMMIT_MISSING="the AWS CLI"
+  if ! command -v jq >/dev/null 2>&1; then
+    CODECOMMIT_MISSING="${CODECOMMIT_MISSING:+$CODECOMMIT_MISSING and }jq"
+  fi
+  if [ -n "$CODECOMMIT_MISSING" ]; then
+    echo "error: watching a CodeCommit pull request requires $CODECOMMIT_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# For GitHub, pr_head is recorded only when the forge's CLI can supply it. gh
+# exposes the head commit as a selectable field, and CodeCommit names it on the
+# pull request's own target and requires it (below); plain glab exposes it only
+# inside its JSON output, which
+# would need a JSON processor firstmate does not require, so a GitLab task
+# records no pr_head. Both consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+
+# The CodeCommit profile is a prerequisite, not a best effort: without it the
+# poll cannot authenticate at all, so an underivable profile stops the watch
+# here rather than arming one that is silent for the wrong reason.
+if [ "$PROVIDER" = codecommit ]; then
+  REMOTE_URL=
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    REMOTE_URL=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
+  fi
+  if [ -z "$REMOTE_URL" ]; then
+    echo "error: could not read the origin remote of the task worktree, so the AWS profile for $URL is unknown" >&2
+    exit 1
+  fi
+  if ! fm_pr_codecommit_remote_profile "$REMOTE_URL" "$PROJECT_PATH" "$REGION"; then
+    echo "error: the origin remote of the task worktree names no AWS profile for repository $PROJECT_PATH in $REGION" >&2
+    exit 1
+  fi
+  CREDENTIAL=$FM_PR_CREDENTIAL
+fi
+
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+# CodeCommit names the head commit of every pull request target, so the exact
+# head is recorded here the way GitHub's is. Unlike GitHub's, this read is a
+# prerequisite rather than a best effort: it is the only proof that the profile
+# the remote names is actually authenticated, and a shape-valid profile whose
+# SSO session has expired is indistinguishable from a working one until the
+# poll runs. A watch that reports itself armed but can never fire silently
+# disables merging green work autonomously and nothing ever surfaces it, which
+# is exactly the failure this file's header says the profile requirement exists
+# to prevent. The trade is accepted deliberately: a transient AWS outage now
+# refuses to arm rather than arming headless, because a refusal is loud,
+# immediate, and recovered by re-running this script, while a dead watch stays
+# quiet until a human notices work never merged.
+# A read that fails and a read that succeeds for another repository leave the
+# operator somewhere different, so they are reported apart the way the missing
+# tool, the unreadable remote, and the underivable profile above already are.
+if [ "$PROVIDER" = codecommit ]; then
+  CC_PR_JSON=
+  CC_PR_TARGETS=
+  REMOTE_HEAD=
+  if ! CC_PR_JSON=$(aws codecommit get-pull-request --pull-request-id "$NUMBER" \
+      --region "$REGION" --profile "$CREDENTIAL" --output json 2>/dev/null) \
+    || [ -z "$CC_PR_JSON" ] \
+    || ! CC_PR_TARGETS=$(printf '%s' "$CC_PR_JSON" | jq -r \
+          'if type == "object" then
+             [(.pullRequest // error("no pull request")).pullRequestTargets[]?
+              | .repositoryName // empty]
+             | join(", ")
+           else
+             error("pull request payload is not an object")
+           end' 2>/dev/null); then
+    echo "error: could not read CodeCommit pull request $NUMBER in $REGION with AWS profile $CREDENTIAL; re-authenticate that profile's SSO session (aws sso login --profile $CREDENTIAL) and re-run bin/fm-pr-check.sh" >&2
+    exit 1
+  fi
+  if ! REMOTE_HEAD=$(printf '%s' "$CC_PR_JSON" | jq -r --arg repo "$PROJECT_PATH" \
+        '[.pullRequest.pullRequestTargets[]
+           | select(.repositoryName == $repo)
+           | .sourceCommit]
+         | if length == 1 then .[0] else error("no single target") end' 2>/dev/null); then
+    echo "error: CodeCommit pull request $NUMBER was read but does not target repository $PROJECT_PATH; it targets ${CC_PR_TARGETS:-no repository}, so the URL names the wrong repository" >&2
+    exit 1
+  fi
+  if ! fm_pr_head_valid "$REMOTE_HEAD"; then
+    echo "error: CodeCommit pull request $NUMBER names no valid head commit for repository $PROJECT_PATH" >&2
+    exit 1
+  fi
+  PR_HEAD=$REMOTE_HEAD
 fi
 
 META_TMP=
@@ -93,7 +187,7 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" "$CREDENTIAL" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1

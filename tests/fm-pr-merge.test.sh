@@ -2151,6 +2151,490 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
+# The CodeCommit fixture. A console URL for a repository whose git remote names
+# the AWS profile, because that remote is the only place the profile is written.
+CC_REGION=us-east-1
+CC_HOST="$CC_REGION.console.aws.amazon.com"
+CC_REPO=Fixture-Repo
+CC_PROFILE=FixtureAccess-000000000000
+CC_URL="https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27?region=$CC_REGION"
+CC_HEAD=cccccccccccccccccccccccccccccccccccccccc
+CC_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
+
+# An aws mock reproducing the real CLI's contract for the four calls this path
+# makes: JSON on stdout and exit 0 on success, a non-zero exit with no stdout on
+# failure. Its answers are files in the case dir, so a test changes one
+# condition at a time. A merge writes the merged marker the outcome read then
+# sees, which is what lets a test hold the merge and the proof apart.
+#
+# It also reproduces the CLI's argument parsing for --commit-message, because
+# that is a contract this path depends on: a separate value beginning with "-"
+# and carrying no space is read as another option, so the option is left without
+# an argument and the command is a usage error, exactly as aws-cli 2.34.9
+# behaves. The message that survives parsing is recorded so a test can assert
+# the exact bytes that reached the CLI.
+add_aws_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/aws.log"
+sub=\${2:-}
+status=\$(cat "$case_dir/cc-status" 2>/dev/null || printf 'OPEN')
+approved=\$(cat "$case_dir/cc-approved" 2>/dev/null || printf 'true')
+mergeable=\$(cat "$case_dir/cc-mergeable" 2>/dev/null || printf 'true')
+head=\$(cat "$case_dir/cc-head" 2>/dev/null || printf '%s' "$CC_HEAD")
+repo=\$(cat "$case_dir/cc-repo" 2>/dev/null || printf '%s' "$CC_REPO")
+title=\$(cat "$case_dir/cc-title" 2>/dev/null || printf 'fixture pull request')
+merged=false
+[ -e "$case_dir/cc-merged" ] && merged=true
+
+record_commit_message() {
+  local message= value
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --commit-message=*) message=\${1#--commit-message=} ;;
+      --commit-message)
+        shift
+        [ "\$#" -gt 0 ] || { printf 'aws: error: argument --commit-message: expected one argument\n' >&2; return 2; }
+        value=\$1
+        case "\$value" in
+          -?*)
+            case "\$value" in
+              *' '*) ;;
+              *) printf 'aws: error: argument --commit-message: expected one argument\n' >&2; return 2 ;;
+            esac
+            ;;
+        esac
+        message=\$value
+        ;;
+    esac
+    shift
+  done
+  printf '%s' "\$message" > "$case_dir/cc-commit-message"
+}
+
+case "\$sub" in
+  get-pull-request)
+    [ "\${FM_TEST_CC_READ_FAIL:-0}" = 0 ] || exit 1
+    printf '{"pullRequest":{"pullRequestId":"27","title":"%s","pullRequestStatus":"%s","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":%s}}]}}\n' \\
+      "\$title" "\$status" "\$repo" "\$head" "\$merged"
+    ;;
+  evaluate-pull-request-approval-rules)
+    [ "\${FM_TEST_CC_APPROVAL_FAIL:-0}" = 0 ] || exit 1
+    printf '{"evaluation":{"approved":%s,"overridden":false}}\n' "\$approved"
+    ;;
+  get-merge-conflicts)
+    [ "\${FM_TEST_CC_CONFLICT_FAIL:-0}" = 0 ] || exit 1
+    printf '{"mergeable":%s,"conflictMetadataList":[]}\n' "\$mergeable"
+    ;;
+  merge-pull-request-by-squash|merge-pull-request-by-three-way|merge-pull-request-by-fast-forward)
+    record_commit_message "\$@" || exit 2
+    [ "\${FM_TEST_CC_MERGE_FAIL:-0}" = 0 ] || exit 1
+    [ "\${FM_TEST_CC_MERGE_SILENT:-0}" = 1 ] || : > "$case_dir/cc-merged"
+    printf '{"pullRequest":{"pullRequestId":"27"}}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/aws"
+  : > "$case_dir/aws.log"
+}
+
+# A CodeCommit case: the shared meta plus a real worktree whose origin remote
+# carries the profile, because that derivation is part of what is under test.
+make_codecommit_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$CC_HEAD"
+  add_aws_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin \
+    "codecommit::$CC_REGION://$CC_PROFILE@$CC_REPO"
+  printf '%s\n' "$case_dir"
+}
+
+# CodeCommit merges under the same away-posture authority as GitHub and GitLab:
+# held without yolo or a grant, and a granted merge persists the authority it ran
+# under so a poll that later observes the merge can attribute it. --allow-red is
+# parsed before the CodeCommit extra-argument refusal, so it is refused by name.
+test_codecommit_away_authority_and_allow_red() {
+  local case_dir rc record
+
+  case_dir=$(make_codecommit_case codecommit-away-held)
+  write_away_record "$case_dir"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "codecommit-away-held: an ungranted merge must refuse while away"
+  assert_grep 'task task-x1 is held for the captain return' "$case_dir/stderr" \
+    "codecommit-away-held: the refusal did not name hold-for-return"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-away-held: a CodeCommit merge ran without a grant"
+
+  case_dir=$(make_codecommit_case codecommit-away-grant)
+  mkdir -p "$case_dir/home"
+  write_away_record "$case_dir" --grant task-x1
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "codecommit-away-grant: a granted mergeable CodeCommit PR should merge: $(cat "$case_dir/stderr")"
+  [ -n "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-away-grant: the granted merge never reached CodeCommit"
+  assert_grep "merge landed: task-x1 $CC_URL away-grant" "$case_dir/state/.wake-queue" \
+    "codecommit-away-grant: the durable outcome did not tag away-grant"
+  record="$case_dir/state/task-x1.merge-authority"
+  [ -f "$record" ] || fail "codecommit-away-grant: the accepted merge authority was not persisted"
+  [ "$(sed -n 2p "$record")" = codecommit ] && [ "$(sed -n 6p "$record")" = away-grant ] \
+    || fail "codecommit-away-grant: the persisted authority does not name codecommit and away-grant"
+
+  case_dir=$(make_codecommit_case codecommit-allow-red)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" --allow-red build \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "codecommit-allow-red: --allow-red must be refused on CodeCommit"
+  assert_grep 'does not apply to CodeCommit' "$case_dir/stderr" \
+    "codecommit-allow-red: the refusal did not name CodeCommit"
+  [ ! -s "$case_dir/aws.log" ] \
+    || fail "codecommit-allow-red: CodeCommit was called for a refused request"
+  pass "a CodeCommit merge honours away authority, persists it, and refuses --allow-red"
+}
+
+# The merge line aws was asked to run, so a test asserts one exact invocation
+# rather than a substring of the whole log. The conflict read is asserted the
+# same way, because the merge API and the merge option it is judged under are
+# one decision and the failure that matters is the two drifting apart.
+aws_merge_line() {
+  grep -F ' merge-pull-request-' "$1" || true
+}
+
+aws_conflict_line() {
+  grep -F ' get-merge-conflicts ' "$1" || true
+}
+
+test_codecommit_url_resolves_and_merges() {
+  local case_dir rc merge_line conflict_line method label api option recorded
+  # Each merge method the caller may ask for picks two coupled values: the AWS
+  # API that merges, and the --merge-option the conflict state is read under.
+  # Both are asserted for every method, because a mapping that pairs one
+  # method's API with another's conflict read would judge the merge one way,
+  # perform it another, and still report itself verified.
+  for method in '' --merge --fast-forward; do
+    case "$method" in
+      '') api='merge-pull-request-by-squash'; option=SQUASH_MERGE; label='default-squash' ;;
+      --merge) api='merge-pull-request-by-three-way'; option=THREE_WAY_MERGE; label=merge ;;
+      --fast-forward) api='merge-pull-request-by-fast-forward'; option=FAST_FORWARD_MERGE; label='fast-forward' ;;
+    esac
+    case_dir=$(make_codecommit_case "codecommit-merges-$label")
+
+    set +e
+    if [ -n "$method" ]; then
+      run_pr_merge "$case_dir" task-x1 "$CC_URL" "$method" \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "codecommit-merges-$label: a mergeable CodeCommit PR should merge"
+    assert_grep "pr=$CC_URL" "$case_dir/state/task-x1.meta" \
+      "codecommit-merges-$label: the canonical URL should be recorded"
+    assert_grep "pr_head=$CC_HEAD" "$case_dir/state/task-x1.meta" \
+      "codecommit-merges-$label: the exact head should be recorded"
+    assert_grep "verified: $CC_URL is merged" "$case_dir/stdout" \
+      "codecommit-merges-$label: a proven merge should be reported"
+    merge_line=$(aws_merge_line "$case_dir/aws.log")
+    conflict_line=$(aws_conflict_line "$case_dir/aws.log")
+    case "$merge_line" in
+      *"$api"*) ;;
+      *) fail "codecommit-merges-$label: $api should be the merge API, got: $merge_line" ;;
+    esac
+    case "$conflict_line" in
+      *"--merge-option $option"*) ;;
+      *) fail "codecommit-merges-$label: the conflict read should use $option, got: $conflict_line" ;;
+    esac
+    case "$merge_line" in
+      *"--source-commit-id $CC_HEAD"*) ;;
+      *) fail "codecommit-merges-$label: the merge should be bound to the verified head, got: $merge_line" ;;
+    esac
+    case "$merge_line" in
+      *"--profile $CC_PROFILE"*) ;;
+      *) fail "codecommit-merges-$label: the profile should come from the worktree remote, got: $merge_line" ;;
+    esac
+    case "$merge_line" in
+      *"--region $CC_REGION"*) ;;
+      *) fail "codecommit-merges-$label: the region should come from the URL, got: $merge_line" ;;
+    esac
+    # A fast-forward creates no commit and the API takes no message, so the
+    # option must be absent rather than empty; the other two carry the pull
+    # request's own title.
+    recorded=$(cat "$case_dir/cc-commit-message" 2>/dev/null || printf '<none>')
+    if [ "$method" = --fast-forward ]; then
+      case "$merge_line" in
+        *--commit-message*) fail "codecommit-merges-$label: a fast-forward merge must carry no commit message, got: $merge_line" ;;
+      esac
+      [ -z "$recorded" ] \
+        || fail "codecommit-merges-$label: a commit message reached the fast-forward merge: $recorded"
+    else
+      case "$merge_line" in
+        *"--commit-message=fixture pull request"*) ;;
+        *) fail "codecommit-merges-$label: the title should be carried as one commit-message token, got: $merge_line" ;;
+      esac
+      [ "$recorded" = 'fixture pull request' ] \
+        || fail "codecommit-merges-$label: the title did not reach the merge verbatim, got: $recorded"
+    fi
+  done
+  pass "a CodeCommit console URL resolves and merges under each merge method it accepts"
+}
+
+# A pull request title is forge data and may be shaped like an option. It has to
+# reach the merge as the commit message verbatim: the AWS CLI reads a separate
+# "-"-leading value as another option, which aborts the merge in argument
+# parsing after the poll is already armed, with only the CLI's usage error to go
+# on. Nothing about the title may be sanitised to dodge that.
+test_codecommit_option_shaped_title_still_merges() {
+  local case_dir rc recorded
+  case_dir=$(make_codecommit_case codecommit-dash-title)
+  printf '%s' '--wip' > "$case_dir/cc-title"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codecommit-dash-title: an option-shaped title must not block the merge"
+  assert_grep "verified: $CC_URL is merged" "$case_dir/stdout" \
+    "codecommit-dash-title: the merge should still be proven"
+  recorded=$(cat "$case_dir/cc-commit-message" 2>/dev/null || printf '<none>')
+  [ "$recorded" = '--wip' ] \
+    || fail "codecommit-dash-title: the title did not reach the merge verbatim, got: $recorded"
+  pass "a CodeCommit pull request title shaped like an option reaches the merge verbatim"
+}
+
+test_codecommit_unproved_merge_refuses() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-unproved)
+
+  # The merge command succeeds and reports nothing wrong, but the pull request
+  # never reads back as merged. Only mergeMetadata.isMerged may settle that, so
+  # this has to refuse rather than report a landed merge.
+  set +e
+  FM_TEST_CC_MERGE_SILENT=1 \
+    run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "codecommit-unproved: an unproved merge must not exit 0"
+  assert_no_grep 'is merged' "$case_dir/stdout" \
+    "codecommit-unproved: an unproved merge must never be reported as merged"
+  assert_grep 'does not read back as merged' "$case_dir/stderr" \
+    "codecommit-unproved: the refusal should say the merge could not be proven"
+  pass "a CodeCommit merge that cannot be proven refuses instead of reporting success"
+}
+
+test_codecommit_closed_but_unmerged_is_not_a_merge() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-closed)
+  # CodeCommit closes an abandoned pull request exactly as it closes a merged
+  # one, so a CLOSED status must never be read as a landed merge.
+  printf 'CLOSED' > "$case_dir/cc-status"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "codecommit-closed: a closed pull request must not merge"
+  assert_grep 'pullRequestStatus is "CLOSED", not OPEN' "$case_dir/stderr" \
+    "codecommit-closed: the refusal should name the status"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-closed: no merge command should have run"
+  pass "a closed but unmerged CodeCommit pull request is refused, never read as merged"
+}
+
+test_codecommit_each_condition_refuses_independently() {
+  local case_dir rc condition
+  for condition in unapproved conflicted; do
+    case_dir=$(make_codecommit_case "codecommit-$condition")
+    case "$condition" in
+      unapproved) printf 'false' > "$case_dir/cc-approved" ;;
+      conflicted) printf 'false' > "$case_dir/cc-mergeable" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-$condition: this condition alone should refuse the merge"
+    [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+      || fail "codecommit-$condition: no merge command should have run"
+    assert_grep "pr=$CC_URL" "$case_dir/state/task-x1.meta" \
+      "codecommit-$condition: a refusal should still leave the PR recorded"
+  done
+  # Both failing at once report both, so an operator sees the whole picture.
+  case_dir=$(make_codecommit_case codecommit-both)
+  printf 'false' > "$case_dir/cc-approved"
+  printf 'false' > "$case_dir/cc-mergeable"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "codecommit-both: two failing conditions should refuse"
+  assert_grep 'approval rules evaluate as "false"' "$case_dir/stderr" \
+    "codecommit-both: the approval refusal should be reported"
+  assert_grep 'reports conflicts' "$case_dir/stderr" \
+    "codecommit-both: the conflict refusal should be reported"
+  pass "each CodeCommit pre-merge condition refuses independently, and all of them report"
+}
+
+test_codecommit_stale_recorded_head_is_reported() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-stale-head)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=$CC_URL" \
+    "pr_head=$CC_STALE_HEAD"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "codecommit-stale-head: a stale recorded head should not block the merge"
+  assert_grep "recorded head $CC_STALE_HEAD disagrees with the live head $CC_HEAD" \
+    "$case_dir/stderr" "codecommit-stale-head: the disagreement should be reported"
+  case "$(aws_merge_line "$case_dir/aws.log")" in
+    *"--source-commit-id $CC_HEAD"*) ;;
+    *) fail "codecommit-stale-head: the live head should be what gets merged" ;;
+  esac
+  pass "a stale recorded CodeCommit head is reported and the live head is verified"
+}
+
+test_codecommit_unreadable_state_refuses() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-unreadable)
+
+  set +e
+  FM_TEST_CC_READ_FAIL=1 \
+    run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "codecommit-unreadable: an unreadable state must refuse"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-unreadable: no merge command should have run"
+  pass "an unreadable CodeCommit pull request refuses rather than merging blind"
+}
+
+test_codecommit_foreign_extra_args_refuse_before_recording() {
+  local case_dir rc
+  for bad in --profile --region --rebase; do
+    case_dir=$(make_codecommit_case "codecommit-arg${bad#--}")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$CC_URL" -- "$bad" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-arg: $bad should be refused"
+    [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+      || fail "codecommit-arg: $bad should refuse before any merge command"
+    ! grep -q "^pr=" "$case_dir/state/task-x1.meta" \
+      || fail "codecommit-arg: $bad should refuse before anything is recorded"
+  done
+  pass "a CodeCommit merge refuses credential, region, and rebase arguments before recording"
+}
+
+test_codecommit_missing_profile_refuses_before_recording() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-no-profile)
+  # A remote that names no profile must not fall back to the default credential
+  # chain, which is exactly what the profile exists to override.
+  git -C "$case_dir/wt" remote set-url origin "codecommit::$CC_REGION://$CC_REPO"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "codecommit-no-profile: an underivable profile must refuse"
+  assert_grep 'names no AWS profile' "$case_dir/stderr" \
+    "codecommit-no-profile: the refusal should name the missing profile"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-no-profile: no merge command should have run"
+  ! grep -q "^pr=" "$case_dir/state/task-x1.meta" \
+    || fail "codecommit-no-profile: nothing should be recorded"
+  pass "a CodeCommit merge refuses when the worktree remote names no AWS profile"
+}
+
+test_codecommit_foreign_repo_remote_refuses() {
+  local case_dir rc
+  case_dir=$(make_codecommit_case codecommit-foreign-remote)
+  # A remote for another repository must never select credentials for this one.
+  git -C "$case_dir/wt" remote set-url origin \
+    "codecommit::$CC_REGION://$CC_PROFILE@Some-Other-Repo"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CC_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "codecommit-foreign-remote: a mismatched remote must refuse"
+  [ -z "$(aws_merge_line "$case_dir/aws.log")" ] \
+    || fail "codecommit-foreign-remote: no merge command should have run"
+  pass "a remote naming another CodeCommit repository cannot select credentials for this merge"
+}
+
+test_codecommit_missing_tool_refuses_before_recording() {
+  local case_dir rc
+  local expected
+  for tool in aws jq; do
+    case_dir=$(make_codecommit_case "codecommit-no-$tool")
+    mirror_path_without "$case_dir/nobin" "$tool" "$case_dir/fakebin"
+    case "$tool" in
+      aws) expected='requires the AWS CLI on PATH' ;;
+      jq) expected='requires jq on PATH' ;;
+    esac
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="${FM_TEST_HOME:-$ROOT}" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/nobin" \
+      "$PR_MERGE" task-x1 "$CC_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-no-$tool: a missing $tool must refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "codecommit-no-$tool: the refusal should name the missing tool"
+    ! grep -q "^pr=" "$case_dir/state/task-x1.meta" \
+      || fail "codecommit-no-$tool: nothing should be recorded"
+  done
+  pass "a CodeCommit merge names an absent AWS CLI or jq before anything is recorded"
+}
+
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
@@ -3079,6 +3563,18 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_codecommit_url_resolves_and_merges
+test_codecommit_option_shaped_title_still_merges
+test_codecommit_unproved_merge_refuses
+test_codecommit_closed_but_unmerged_is_not_a_merge
+test_codecommit_each_condition_refuses_independently
+test_codecommit_stale_recorded_head_is_reported
+test_codecommit_unreadable_state_refuses
+test_codecommit_foreign_extra_args_refuse_before_recording
+test_codecommit_missing_profile_refuses_before_recording
+test_codecommit_foreign_repo_remote_refuses
+test_codecommit_missing_tool_refuses_before_recording
+test_codecommit_away_authority_and_allow_red
 test_absent_backlog_still_merges
 test_unreadable_backlog_refuses_the_merge
 test_unreadable_backend_config_refuses_the_merge

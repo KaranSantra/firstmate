@@ -106,12 +106,10 @@
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
 #                          between observations for FM_SECONDMATE_WAKE_STALL_SECS
-#                          while the mate was not in an active turn (a busy mate
-#                          is exempt only until the queue has been frozen for
-#                          BUSY_TURN_MAX_SECS); declared external-wait pause
-#                          rows do not feed this escalation, observation is
-#                          read-only, and one parent notification covers each
-#                          no-progress episode
+#                          while the mate was not in an active turn; declared
+#                          external-wait pause rows do not feed this escalation,
+#                          observation is read-only, and one parent notification
+#                          covers each no-progress episode
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -694,6 +692,76 @@ signal_turnend_panes_churned() {  # <file> ...
   return 0
 }
 
+# Worker endpoints found gone during this poll's pane-staleness pass. A capture
+# failure alone proves nothing, so only the adapter's structural `missing`
+# verdict counts, and only for Herdr, where closing a project's parent row
+# closes every worker space grouped under it at once and nothing else wakes
+# firstmate for a quiet worker whose terminal vanished. Each lost endpoint is
+# surfaced once; .endpoint-lost-<key> remembers the endpoint already reported.
+ENDPOINTS_LOST=()
+
+endpoint_lost_note() {  # <window> <task>
+  local w=$1 task=$2 marker
+  [ -n "$task" ] || return 0
+  [ "$(window_kind "$w")" != secondmate ] || return 0
+  [ "$(window_backend "$w")" = herdr ] || return 0
+  marker="$STATE/.endpoint-lost-$(window_key "$w")"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$w" ] || return 0
+  [ "$(fm_backend_agent_state herdr "$w" 2>/dev/null || true)" = missing ] || return 0
+  ENDPOINTS_LOST+=("$w")
+}
+
+# One lost worker's recovery facts: its project, whether its worktree holds
+# uncommitted changes or commits no remote has, and whether the Herdr project
+# parent space its exact grouping binding recorded is gone too.
+endpoint_lost_detail() {  # <task>
+  local task=$1 meta project wt work ahead journal parent_state group=
+  meta="$STATE/$task.meta"
+  project=$(fm_meta_get "$meta" project 2>/dev/null || true)
+  wt=$(fm_meta_get "$meta" worktree 2>/dev/null || true)
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null || true)" ]; then
+      work="uncommitted changes in $wt"
+    else
+      work="no uncommitted changes in $wt"
+    fi
+    ahead=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || true)
+    case "$ahead" in
+      ''|*[!0-9]*) work="$work, unpushed commits unreadable" ;;
+      0) ;;
+      *) work="$work, $ahead commits on no remote" ;;
+    esac
+  else
+    work="its recorded worktree '${wt:-none}' is missing"
+  fi
+  fm_backend_source herdr 2>/dev/null || { printf '%s' "${project:+project $project; }$work"; return 0; }
+  journal="$STATE/$task$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"
+  if [ -f "$journal" ] \
+     && fm_backend_herdr_projection_journal_snapshot "$journal" "$task" \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 4 ]; then
+    parent_state=$(fm_backend_herdr_workspace_presence_state \
+      "$FM_BACKEND_HERDR_JOURNAL_SESSION" "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" 2>/dev/null || true)
+    [ "$parent_state" != dead ] \
+      || group="; its Herdr project space '$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL' is closed too"
+  fi
+  printf '%s' "${project:+project $project; }$work$group"
+}
+
+surface_endpoints_lost() {
+  local w task summary='' reason
+  for w in "${ENDPOINTS_LOST[@]}"; do
+    task=$(window_to_task "$w" "$STATE")
+    summary="${summary:+$summary | }$task: $(endpoint_lost_detail "$task")"
+  done
+  for w in "${ENDPOINTS_LOST[@]}"; do
+    task=$(window_to_task "$w" "$STATE")
+    reason="stale: $w (worker terminal gone: $task's endpoint no longer exists, so its agent is not running; nothing on disk was removed - recover it. Workers lost together: $summary)"
+    fm_wake_append stale "$w" "$reason" || exit 1
+    printf '%s' "$w" > "$STATE/.endpoint-lost-$(window_key "$w")" || exit 1
+  done
+  wake "$reason"
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -740,17 +808,13 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # by the same BUSY_TURN_MAX_SECS that stops a busy pane from proving liveness
 # forever. A mate mid-turn has not stopped draining its queue - it simply drains
 # between turns - so this gate, not the elapsed interval, is what separates a
-# healthy mate from a frozen wake loop. The bound is measured on <idle>, how long
-# the queue's drain position has not moved, because a mate's turns end in its own
-# home and this home holds no completed-turn evidence to age them by
-# (busy_turn_over_age, whose spawn-record fallback would age every mate from its
-# launch). Any absence of proof (no window, a failed capture, an idle or unknown
-# verdict, a queue frozen past the bound) is NOT an active turn, so a frozen
-# queue still escalates.
-secondmate_in_active_turn() {  # <window> <idle>
-  local w=$1 idle=$2 tail40
+# healthy mate from a frozen wake loop. Any absence of proof (no window, a failed
+# capture, an idle or unknown verdict, a busy pane past the bound) is NOT an
+# active turn, so a frozen queue still escalates.
+secondmate_in_active_turn() {  # <task> <window>
+  local task=$1 w=$2 tail40
   [ -n "$w" ] || return 1
-  [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
+  ! busy_turn_over_age "$task" || return 1
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
   window_is_busy "$w" "$tail40"
 }
@@ -765,8 +829,7 @@ secondmate_in_active_turn() {  # <window> <idle>
 # never to the interval. A moved position ends an alerted episode and starts a
 # new observation interval, so a newly-oldest row cannot alert immediately while
 # a later genuine freeze remains visible. A mate demonstrably inside an active
-# turn defers its escalation, but only while this same interval is under
-# BUSY_TURN_MAX_SECS, so a turn that never ends cannot hide a frozen queue.
+# turn never escalates, so the interval is only the backstop behind that gate.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
 secondmate_wake_stall_tick() {
@@ -830,7 +893,7 @@ EOF
     [ "$episode_alerted" -eq 0 ] || continue
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
-    ! secondmate_in_active_turn "$(fm_backend_target_of_meta "$meta")" "$idle" || continue
+    ! secondmate_in_active_turn "$task" "$(fm_backend_target_of_meta "$meta")" || continue
     receipt="$receipt_dir/$row_key"
     if [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ]; then
       fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
@@ -2031,6 +2094,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
+          credential=$FM_PR_POLL_SNAPSHOT_CREDENTIAL
           PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
           fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
           if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
@@ -2039,7 +2103,7 @@ while :; do
             continue
           fi
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" "$credential" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -2230,6 +2294,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
+  ENDPOINTS_LOST=()
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -2251,7 +2316,13 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_lost_note "$w" "$task"
+      continue
+    fi
+    # A readable endpoint is not lost, so a report marker for this key belongs to
+    # an earlier endpoint and must not suppress a later loss that reuses its id.
+    [ ! -e "$STATE/.endpoint-lost-$key" ] || rm -f "$STATE/.endpoint-lost-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2446,6 +2517,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  [ "${#ENDPOINTS_LOST[@]}" -eq 0 ] || surface_endpoints_lost
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

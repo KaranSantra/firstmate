@@ -15,7 +15,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` only for optional protocol-16 focus-safe workspace removal and native event subscription.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -79,7 +79,8 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Presentation spaces
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+Each new crewmate or scout gets its own space nested under its project's row in the Herdr sidebar by default, on Herdr 0.8.0 and newer.
+All of one project's workers share that one project row, so the sidebar grows by project rather than by worker.
 A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
 An absent file leaves the choice to the version floor below, an empty file and the value `on` are both a deliberate opt-in, values are compared with whitespace stripped and case ignored, and an unrecognized value warns and follows the unconfigured default rather than failing a spawn over a purely visual setting.
 The empty file is the historical presence-based opt-in form, so every home that had already enabled the projection stays enabled with no migration step, and no previously enabled home can be turned off by the default or by the floor.
@@ -99,29 +100,35 @@ The setting is inherited into secondmate homes through the normal configuration-
 A secondmate agent itself always stays in its ordinary parent workspace; only children launched by that home are eligible.
 An unconverged opt-out keeps the default projection in that home until convergence.
 
-Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
-Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
-Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token before asking Herdr to create anything.
-After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
-Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
-The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
+Herdr nests a space under a project only when its own worktree command opened that space for a linked Git worktree; a space created at a worktree path any other way stays a top-level row.
+A worker's worktree exists only after `treehouse get` runs inside its terminal, so a fresh worker starts in its launching space exactly like the flat layout.
+Once the worktree is validated and before any agent launches, Firstmate asks Herdr to open that worktree from the project's main checkout, which creates the worker's child space and creates or reuses the project's parent space.
+Firstmate then moves the worker's terminal into the child with its processes intact and prunes the child's seeded tab.
+Firstmate never creates, adopts, relabels, reorders, or closes a parent space: Herdr owns it, labels it with the repository name, and draws a project's children together under it whatever the workspace order.
+The child space's label is the concise task name alone, and the `fm-<id>` task tab label is unchanged.
+`bin/backends/herdr.sh`'s `fm_backend_herdr_projection_group_task` owns the mechanics.
 
-The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
-Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
-Only the exact seeded default tab returned by the same workspace-create response can be pruned.
-Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
+Grouping is refused with nothing changed, leaving the worker in its launching space, in four cases.
+The would-be parent is the launching space itself, as when Firstmate works on its own repository from a space at that checkout, because closing that project would then close the launcher.
+The would-be parent already holds a Firstmate `fm-` task tab, as a home space at that checkout would, because closing that project would then close those workers too.
+A pane in the would-be parent runs an agent, because a closable group parent must never hold a running agent.
+The worktree is already open in another space, because Herdr would relabel that space.
+A contended presentation lock, an unreadable worktree list, or a failed open or move also leaves the worker in its launching space, and a failed move first removes the empty child through its own seeded pane.
+The one grouping failure that stops a spawn is a move whose result leaves the worker's terminal unidentifiable, because launching an agent into an unknown pane is worse than no worker.
+
+Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
+Only a fresh task with neither metadata nor an existing presentation journal is eligible.
+Before asking Herdr to open anything, Firstmate atomically publishes a version 3 attempt journal holding a random 128-bit base64url token and the worktree's physical path.
+After the child converges to exactly the task tab and pane under a verified parent, the journal advances to a version 4 binding that records the physical home, named session, endpoint, parent, expected labels, and that checkout path.
+Herdr's worktree membership correlates a grouped space with its journal, and at most one space can hold a checkout open, so neither the token nor any correlator is displayed.
+Version 1 and 2 journals from the retired flat projection, whose visible title carried `└ <concise-task> · p:<token>`, are still read so workers started before grouping keep recovering and retiring; nothing writes them any more.
+No token, checkout path, title, or journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
+The moved task tab lands in the exact child returned by Herdr's worktree open, and only the exact seeded tab from that same response can be pruned.
+Before and after open, move, prune, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
-`bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
-Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
-Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
-A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
-
-Ordering failure never fails the task spawn.
-Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
-The worker remains on the ordinary flat or Herdr-current-order path.
+`bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order; the focus-safe removal below is its only caller.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
@@ -141,10 +148,21 @@ Durable task records are erased only once the exact pane is confirmed gone throu
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
+Closing a project's parent row, from Herdr's sidebar or its API, closes every space in that project's group at once and ends every worker running there.
+It deletes no Git worktree, branch, or commit; closing one worker's child space closes only that child.
+Herdr asks for confirmation before closing a space unless its own `confirm_close` setting is false, and for a group the dialog reads "Close worktree group?" with space and pane counts rather than naming the workers.
+Herdr offers no hook that can veto or intercept a close: its plugin hooks and events fire only afterward, and a group close emits one event for the parent alone.
+Firstmate therefore cannot refuse such a close.
+Instead the watcher notices, on its next poll, that a Herdr worker's terminal no longer exists and wakes Firstmate once per lost endpoint.
+That report names every worker lost in the same poll with its project, whether its worktree holds uncommitted changes or commits no remote has, and whether its project row is closed too; `bin/fm-watch.sh` owns the detection.
+Relaunching such a worker in place is refused today, because relaunch reuses the recorded terminal and that terminal no longer exists; the worker's worktree, branch, and commits stay intact for recovery.
+If the task is later dispatched fresh, no space still holds its recorded checkout, so its stale grouping journal is retired and the new worker is grouped afresh once its worktree is known.
+
 Recovery is deliberately conservative and presentation-only.
-An existing journal suppresses another projected create.
+An existing journal suppresses another grouped create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
-A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
+A grouped worker is never reclaimed in place, because its space belongs to exactly one worktree and a fresh dispatch acquires a fresh one.
+Only a retired same-identity version 2 binding may replace one exact agent-free restart husk in place, and only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
 The replacement tab and pane are created and verified before the old pane is rechecked and closed, then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
@@ -153,8 +171,8 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
 It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
-Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
-The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+Discovery starts from Herdr's worktree membership for a grouped child, where exactly one space in the named-session snapshot holds the journal's checkout path, or from the retired `└ <concise-task> · p:<22-character-token>` title grammar with exactly one token occurrence; a title, token, or checkout path alone is never mutation authority.
+The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 or 4 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
 The task's ordinary metadata must be absent, and the candidate must have exactly one tab and exactly one pane.
 Before cleanup, Firstmate acquires the existing task-id spawn lock and then the shared named-session presentation lock.
 Inside both locks it takes one exact snapshot, requires one unambiguous non-target focus and the exact title, token, tab, and pane shape, positively confirms no registered agent, and reads Herdr's process information for the exact named-session pane.
@@ -169,19 +187,23 @@ A malformed or missing title or token, duplicate token, zero or multiple journal
 
 Operational compromises:
 
-- Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
-- A failed journal publication or projected workspace create stops that spawn instead of falling back flat, so a Herdr create failure surfaces as a spawn failure in every Herdr home rather than only in homes that opted in; every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
+- Grouping is best-effort; a grouped worker is never reclaimed in place after a Herdr restart, and only an exact same-identity retired version 2 binding survives one in place.
+- A failed journal publication, a contended lock, or a failed Herdr grouping call leaves that worker in its launching space rather than stopping the spawn; only an unidentifiable moved terminal stops it.
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended rather than falling back flat, and default-on makes that refusal reachable in any Herdr home.
-- Existing layouts are not force-renamed or rearranged.
-- Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
+- A worker launched from a space that sits at its own project's main checkout, such as Firstmate working on its own repository, stays in that space.
+- Closing a project row ends every worker grouped under it; Firstmate reports the loss but cannot prevent it, and cannot yet relaunch those workers in place.
+- A project's parent space persists after its last worker leaves; close it in Herdr once it is no longer wanted.
+- Existing layouts are not force-renamed or rearranged, and retired flat projections are never migrated into a project group.
+- Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old space remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
-- Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
-- The visible token is only a restart-stable correlator and never substitutes for the exact binding.
+- Regaining a grouped space after degradation requires stopping the flat task, manually checking the stale space, and clearing its journal before a genuinely fresh launch.
+- The journal token and checkout path are only restart-stable correlators and never substitute for the exact binding.
 
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
+`tests/fm-watch-triage.test.sh` covers the once-per-endpoint lost-worker report.
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` proves a persisted-focused tab still closes when no foreground client is attached.
@@ -345,7 +367,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ## Active limits
 
-- Presentation ordering needs protocol 16 and Python and is best-effort only.
+- Project grouping relies on Herdr's worktree commands and is best-effort only, and a project-row close cannot be refused.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.

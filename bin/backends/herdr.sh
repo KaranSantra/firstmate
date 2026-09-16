@@ -16,14 +16,16 @@
 # docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
 # per task inside its home's workspace. The default-on presentation projection
-# creates a disposable workspace for a clean fresh task instead unless the home
-# opts out. That
-# workspace is a non-authoritative visual projection containing only the normal
-# task pane. Its random token and mutable label never authorize lookup,
+# instead moves a clean fresh task, once its worktree exists, into its own
+# child space nested under its project's parent space through Herdr's worktree
+# grouping, unless the home opts out. That child space is a non-authoritative
+# visual projection containing only the normal task pane. Its journal token,
+# checkout-path correlation, and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
-# A version 2 journal can participate in replacing only its exact same-identity
-# endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
-# focus, and agent-absence checks all agree under the session lock.
+# A retired version 2 flat-projection journal can participate in replacing only
+# its exact same-identity endpoint after metadata, home, session, workspace,
+# tab, pane, parent, shape, focus, and agent-absence checks all agree under the
+# session lock.
 # Every ambiguous recovered launch uses the default flat home workspace when
 # duplicate-agent risk is independently absent.
 # Target resolution stays parallel to the tmux adapter in both layouts.
@@ -567,14 +569,29 @@ fm_backend_herdr_projection_journal_path() {  # <state-dir> <task-id>
 }
 
 # fm_backend_herdr_projection_journal_create: atomically publish the
-# non-authoritative attempt journal before any projection workspace create.
+# non-authoritative version 3 attempt journal before any grouping mutation.
+# <checkout-path> is the task's physical worktree, the structural correlator a
+# grouped child space carries in Herdr's own worktree membership.
 # A hard-link publication in the same state directory gives create-if-absent
 # semantics, so concurrent attempts cannot overwrite each other's token.
-fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
-  local state=$1 id=$2 journal token tmp
+fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id> <checkout-path>
+  local state=$1 id=$2 checkout=${3:-} journal token tmp
   case "$id" in
     ''|.*|*[!A-Za-z0-9._-]*)
       echo "error: invalid task id for herdr presentation journal" >&2
+      return 1
+      ;;
+  esac
+  case "$checkout" in
+    /*) ;;
+    *)
+      echo "error: herdr presentation journal needs an absolute checkout path" >&2
+      return 1
+      ;;
+  esac
+  case "$checkout" in
+    *$'\n'*|*$'\r'*)
+      echo "error: herdr presentation journal checkout path must be one line" >&2
       return 1
       ;;
   esac
@@ -591,9 +608,10 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
   tmp=$(mktemp "$state/.${id}.herdr-presentation.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   if ! {
-    printf 'version=1\n'
+    printf 'version=3\n'
     printf 'task_id=%s\n' "$id"
     printf 'projection_id=%s\n' "$token"
+    printf 'checkout_path=%s\n' "$checkout"
   } > "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -614,12 +632,18 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
   grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
 }
 
-# fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
-# journal or a version 2 exact projection binding without sourcing shell code.
-# Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
+# fm_backend_herdr_projection_journal_snapshot: validate a journal without
+# sourcing shell code, setting FM_BACKEND_HERDR_JOURNAL_* globals for
+# same-process callers.
+# Versions 3 (attempt) and 4 (exact binding) belong to a grouped child space and
+# carry its checkout path.
+# Versions 1 and 2 are the retired flat projection, whose visible title carried
+# the correlator; they are still read so records written before grouping keep
+# recovering and retiring, but nothing writes them any more.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   local journal=$1 id=$2 lines expected_label expected_task_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
+  FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
   FM_BACKEND_HERDR_JOURNAL_HOME=""
@@ -644,6 +668,14 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
     1:3) return 0 ;;
     2:12) ;;
+    3:4|4:13)
+      FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH=$(fm_backend_herdr_projection_journal_field "$journal" checkout_path) || return 1
+      case "$FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH" in
+        /*) ;;
+        *) return 1 ;;
+      esac
+      [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 4 ] || return 0
+      ;;
     *) return 1 ;;
   esac
   FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
@@ -672,7 +704,11 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 4 ]; then
+    expected_label=$(fm_backend_herdr_projection_workspace_label "$id")
+  else
+    expected_label=$(fm_backend_herdr_projection_legacy_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  fi
   expected_task_label="fm-$id"
   [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
@@ -691,14 +727,17 @@ fm_backend_herdr_projection_home_identity() {  # <home>
   (cd "$home" 2>/dev/null && pwd -P)
 }
 
-fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
+# fm_backend_herdr_projection_journal_write_bound: atomically replace a journal
+# with an exact binding. A <checkout-path> makes it a version 4 grouped binding;
+# without one it rewrites a retired version 2 flat binding in place.
+fm_backend_herdr_projection_journal_write_bound() {  # <journal> <task-id> <token> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> [checkout-path]
   local journal=$1 id=$2 token=$3 home=$4 session=$5 workspace=$6 tab=$7 pane=$8
-  local parent_workspace=$9 parent_label=${10} workspace_label=${11} task_label=${12} state tmp
+  local parent_workspace=$9 parent_label=${10} workspace_label=${11} task_label=${12} checkout=${13:-} state tmp
   state=$(dirname "$journal")
   tmp=$(mktemp "$state/.${id}.herdr-presentation.bind.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   if ! {
-    printf 'version=2\n'
+    if [ -n "$checkout" ]; then printf 'version=4\n'; else printf 'version=2\n'; fi
     printf 'task_id=%s\n' "$id"
     printf 'projection_id=%s\n' "$token"
     printf 'home=%s\n' "$home"
@@ -710,6 +749,7 @@ fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> 
     printf 'parent_label=%s\n' "$parent_label"
     printf 'workspace_label=%s\n' "$workspace_label"
     printf 'task_label=%s\n' "$task_label"
+    [ -z "$checkout" ] || printf 'checkout_path=%s\n' "$checkout"
   } > "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -718,34 +758,37 @@ fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> 
   mv -f "$tmp" "$journal"
 }
 
-# fm_backend_herdr_projection_journal_bind: upgrade one exact version 1
-# attempt to a version 2 binding after the live projection and parent relation
-# have both been verified under the session lock.
+# fm_backend_herdr_projection_journal_bind: upgrade one exact version 3
+# attempt to a version 4 binding after the grouped child space, its task
+# endpoint, and its project parent have all been verified under the session
+# lock. The attempt's checkout path is carried forward unchanged.
 fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local journal=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
-  local parent_workspace=$8 parent_label=$9 workspace_label=${10} task_label=${11} token
+  local parent_workspace=$8 parent_label=$9 workspace_label=${10} task_label=${11} token checkout
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ] || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] || return 1
   token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
-  fm_backend_herdr_projection_journal_write_v2 \
+  checkout=$FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH
+  fm_backend_herdr_projection_journal_write_bound \
     "$journal" "$id" "$token" "$home" "$session" "$workspace" "$tab" "$pane" \
-    "$parent_workspace" "$parent_label" "$workspace_label" "$task_label"
+    "$parent_workspace" "$parent_label" "$workspace_label" "$task_label" "$checkout"
 }
 
 # fm_backend_herdr_projection_journal_replace_endpoint: atomically advance one
-# exact version 2 binding after its old husk was replaced successfully.
+# exact version 2 or 4 binding after its old husk was replaced successfully.
 fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> <old-tab> <old-pane> <new-tab> <new-pane>
   local journal=$1 id=$2 old_tab=$3 old_pane=$4 new_tab=$5 new_pane=$6
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in 2|4) ;; *) return 1 ;; esac
+  [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$old_pane" ] || return 1
-  fm_backend_herdr_projection_journal_write_v2 \
+  fm_backend_herdr_projection_journal_write_bound \
     "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_tab" "$new_pane" \
     "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH"
 }
 
 # fm_backend_herdr_projection_concise_task_label: strip redundant owner
@@ -765,11 +808,19 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   printf '%s' "$task"
 }
 
-# fm_backend_herdr_projection_workspace_label: presentation-only child label.
-# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
-# Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
+# fm_backend_herdr_projection_workspace_label: presentation-only child label,
+# the concise task name alone. Herdr's own worktree group supplies the nesting,
+# so the label carries no tree glyph and no correlator.
+# Labels remain non-authoritative; the journal holds the correlator.
+fm_backend_herdr_projection_workspace_label() {  # <task-id>
+  fm_backend_herdr_projection_concise_task_label "$1"
+}
+
+# fm_backend_herdr_projection_legacy_workspace_label: the retired flat
+# projection title "└ <concise-task> · p:<token>". It is only read back, so
+# version 1 and 2 journals and their spaces created before grouping still
+# validate, recover, and retire; no space is ever created with it.
+fm_backend_herdr_projection_legacy_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
@@ -1451,198 +1502,6 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
   printf '%s\n' "$shell_pid"
-}
-
-# fm_backend_herdr_projection_order_best_effort: place the exact workspace id
-# returned by THIS projected create immediately after its owning parent's
-# contiguous child block and before the next parent.
-#
-# <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
-# Optional <parent-workspace-id> is that parent's EXACT id, which the caller
-# already resolved from the launching agent's own herdr identity. When given it
-# anchors the owning parent by id, so two workspaces sharing the home label no
-# longer make the whole layout ambiguous; when omitted the parent is located by
-# label exactly as before. With a unique label the two select the same
-# workspace, so ordering behavior is unchanged in the ordinary case.
-# New-format └ ... · p:<token> children and, for compatibility only, already
-# adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
-# the block read-only; they are never renamed or moved.
-#
-# This is presentation-only and always returns success.
-# Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
-# warning and leaves the safely-created worker running in Herdr's current
-# order.
-# It never looks up a task endpoint, adopts or reuses a workspace, retries an
-# ambiguous move, or calls any close/delete/rename primitive.
-# The sole move target is <created-workspace-id>, captured directly from the
-# current workspace-create response.
-# After a successful move, every pre-existing workspace id sequence excluding
-# the new id must be byte-identical to the pre-move sequence.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
-  local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
-  local before_existing after_existing
-  [ -n "$parent" ] || {
-    echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
-    echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" '
-    def is_parent:
-      if ($parent_ws | length) > 0
-      then .workspace_id == $parent_ws
-      else (.label | type) == "string" and .label == $parent
-      end;
-    def is_top_level_parent:
-      (.label | type) == "string"
-      and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
-    def is_new_child:
-      (.label | type) == "string"
-      and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
-    def is_legacy_child:
-      (.label | type) == "string"
-      and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
-    def is_legacy_child_for($owner):
-      is_legacy_child and (.label | startswith($owner + "/"));
-    def is_child_for($owner):
-      is_new_child or is_legacy_child_for($owner);
-    (.result.workspaces // null) as $spaces
-    | select(($spaces | type) == "array" and ($spaces | length) > 0)
-    | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
-    | select(($matches | length) == 1)
-    | ($matches[0]) as $current
-    | select($current == (($spaces | length) - 1))
-    | ([range(0; $spaces | length) | select($spaces[.] | is_parent)]) as $parents
-    | select(($parents | length) == 1)
-    | ($parents[0]) as $pidx
-    | select($pidx < $current)
-    | (
-        reduce range($pidx + 1; $current) as $i (
-          0;
-          if ($spaces[$i] | is_child_for($parent)) and (. == ($i - $pidx - 1))
-          then . + 1
-          else .
-          end
-        )
-      ) as $block
-    | (reduce range($pidx + 1 + $block; $current) as $i (
-        {valid: true, active_parent: null};
-        if .valid == false then .
-        elif ($spaces[$i] | is_top_level_parent) then
-          .active_parent = $spaces[$i].label
-        elif ($spaces[$i] | is_new_child) then
-          if .active_parent == null then .valid = false else . end
-        elif ($spaces[$i] | is_legacy_child) then
-          .active_parent as $owner
-          | if $owner == null then
-              .valid = false
-            elif (($spaces[$i] | is_legacy_child_for($owner)) | not) then
-              .valid = false
-            else
-              .
-            end
-        else
-          .active_parent = null
-        end
-      )) as $remainder
-    | select($remainder.valid == true)
-    | {
-        current: $current,
-        desired: ($pidx + 1 + $block),
-        parent_index: $pidx,
-        existing: [$spaces[] | select(.workspace_id != $created) | .workspace_id]
-      }
-  ' 2>/dev/null) || analysis=
-  [ -n "$analysis" ] || {
-    echo "warning: herdr presentation ordering found an ambiguous workspace layout; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-  current=$(printf '%s' "$analysis" | jq -r '.current // empty' 2>/dev/null)
-  desired=$(printf '%s' "$analysis" | jq -r '.desired // empty' 2>/dev/null)
-  case "$current:$desired" in
-    *[!0-9:]*)
-      echo "warning: herdr presentation ordering could not parse the target position; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-  esac
-  [ "$current" != "$desired" ] || return 0
-
-  if fm_backend_herdr_workspace_move_capable "$session"; then
-    move_capable=0
-  else
-    move_capable=$?
-  fi
-  case "$move_capable" in
-    0) ;;
-    1)
-      echo "warning: herdr presentation ordering requires python3; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-    2)
-      echo "warning: herdr presentation ordering could not verify the client protocol; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-    3)
-      echo "warning: herdr presentation ordering needs protocol $FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL or newer; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-    4)
-      echo "warning: herdr presentation ordering could not read the API schema; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-    *)
-      echo "warning: herdr presentation ordering API support is unavailable or ambiguous; leaving worker in Herdr's current order" >&2
-      return 0
-      ;;
-  esac
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
-    echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-
-  mover=${FM_BACKEND_HERDR_WORKSPACE_MOVER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "warning: herdr presentation ordering could not capture exact active workspace and tab; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-  if response=$("$mover" "$socket" "$created" "$desired" 2>/dev/null); then
-    move_status=0
-  else
-    move_status=$?
-  fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace move" || true
-  if [ "$move_status" -ne 0 ]; then
-    echo "warning: herdr presentation workspace move failed or had an ambiguous response; leaving worker running without cleanup" >&2
-    return 0
-  fi
-  if ! printf '%s' "$response" | jq -e --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" --argjson desired "$desired" '
-    def is_parent:
-      if ($parent_ws | length) > 0
-      then .workspace_id == $parent_ws
-      else (.label | type) == "string" and .label == $parent
-      end;
-    .result.type == "workspace_list"
-    and (.result.workspaces | type) == "array"
-    and .result.workspaces[$desired].workspace_id == $created
-    and ([.result.workspaces[] | select(is_parent)] | length) == 1
-    and (
-      [range(0; .result.workspaces | length) as $i
-        | select(.result.workspaces[$i] | is_parent)
-        | $i][0] < $desired
-    )
-  ' >/dev/null 2>&1; then
-    echo "warning: herdr presentation workspace move returned an unverifiable order; leaving worker running without cleanup" >&2
-    return 0
-  fi
-
-  before_existing=$(printf '%s' "$analysis" | jq -c '.existing' 2>/dev/null)
-  after_existing=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select(.workspace_id != $created) | .workspace_id]' 2>/dev/null)
-  if [ "$after_existing" != "$before_existing" ]; then
-    echo "warning: herdr presentation workspace move did not preserve relative order; leaving worker running without cleanup" >&2
-  fi
-  return 0
 }
 
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
@@ -2463,131 +2322,270 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
-# fm_backend_herdr_projection_create_task: create one disposable presentation
-# workspace and its normal fm-<id> task tab without looking up, adopting, or
-# reusing any existing workspace.
-# The caller must atomically publish the projection journal first.
-# This function sets exact response-derived globals and prints nothing:
-#   FM_BACKEND_HERDR_PROJECTION_SESSION
-#   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-#   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-#   FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-#   FM_BACKEND_HERDR_PROJECTION_TAB_ID
-#   FM_BACKEND_HERDR_PROJECTION_PANE_ID
-#   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE
-# CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
-# A missing, failed, or malformed create response stays ambiguous and grants no
-# cleanup authority.
-fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
-  FM_BACKEND_HERDR_PROJECTION_SESSION=""
+# fm_backend_herdr_projection_physical_dir: print one existing directory's
+# physical path, or fail.
+fm_backend_herdr_projection_physical_dir() {  # <dir>
+  [ -d "$1" ] || return 1
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+# fm_backend_herdr_projection_group_worktrees: read Herdr's own worktree list
+# for one project and set, by physical path:
+#   FM_BACKEND_HERDR_GROUP_ROOT_SEEN / _ROOT_OPEN         the main checkout and
+#                                                         the space open there
+#   FM_BACKEND_HERDR_GROUP_WORKTREE_SEEN / _WORKTREE_OPEN the task worktree and
+#                                                         the space open there
+# An empty _OPEN means no space has that checkout open.
+fm_backend_herdr_projection_group_worktrees() {  # <session> <project-root> <worktree-real>
+  local session=$1 project_root=$2 worktree_real=$3 list rows path open path_real
+  FM_BACKEND_HERDR_GROUP_ROOT_SEEN=0
+  FM_BACKEND_HERDR_GROUP_ROOT_OPEN=""
+  FM_BACKEND_HERDR_GROUP_WORKTREE_SEEN=0
+  FM_BACKEND_HERDR_GROUP_WORKTREE_OPEN=""
+  list=$(fm_backend_herdr_cli "$session" worktree list --cwd "$project_root" 2>/dev/null) || return 1
+  rows=$(printf '%s' "$list" | jq -er '
+    .result.worktrees
+    | select(type == "array")
+    | .[]
+    | select((.path | type) == "string" and (.path | length) > 0)
+    | [.path, (.open_workspace_id // "")]
+    | @tsv
+  ' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r path open; do
+    [ -n "$path" ] || continue
+    path_real=$(fm_backend_herdr_projection_physical_dir "$path") || continue
+    if [ "$path_real" = "$project_root" ]; then
+      FM_BACKEND_HERDR_GROUP_ROOT_SEEN=$((FM_BACKEND_HERDR_GROUP_ROOT_SEEN + 1))
+      FM_BACKEND_HERDR_GROUP_ROOT_OPEN=$open
+    elif [ "$path_real" = "$worktree_real" ]; then
+      FM_BACKEND_HERDR_GROUP_WORKTREE_SEEN=$((FM_BACKEND_HERDR_GROUP_WORKTREE_SEEN + 1))
+      FM_BACKEND_HERDR_GROUP_WORKTREE_OPEN=$open
+    fi
+  done <<EOF
+$rows
+EOF
+  [ "$FM_BACKEND_HERDR_GROUP_ROOT_SEEN" = 1 ] && [ "$FM_BACKEND_HERDR_GROUP_WORKTREE_SEEN" = 1 ]
+}
+
+# fm_backend_herdr_projection_group_rollback: remove one fresh child space by
+# closing the exact seeded pane its own worktree.open response named.
+# Returns 0 only once that pane is confirmed gone.
+fm_backend_herdr_projection_group_rollback() {  # <session> <seeded-pane>
+  fm_backend_herdr_projection_close_pane_focus_preserving "$1" "$2" no-agent || true
+  [ "$(fm_backend_herdr_pane_agent_state "$1" "$2")" = dead ]
+}
+
+# fm_backend_herdr_projection_group_task: move one freshly staged task pane
+# into its own grouped child space under its project's parent space.
+#
+# Herdr nests a sidebar row under a project only when the space was opened
+# through worktree.open; a plain workspace.create at a worktree path stays a
+# top-level row. worktree.open itself creates the project's parent space, or
+# reuses the space already open at the project's main checkout, so every later
+# worker on the same project lands under that one parent.
+# A task's worktree exists only after `treehouse get` runs inside its staged
+# pane, so that pane is moved into the new child with pane.move, which keeps its
+# processes, and the child's seeded tab is then pruned.
+# Firstmate never creates, adopts, relabels, moves, or closes a parent.
+# Closing a parent row closes its whole group, so grouping is refused with
+# nothing mutated when the would-be parent is the staged space itself or is
+# running an agent. It is also refused when the worktree is already open in some
+# space, because worktree.open would relabel that space.
+#
+# The caller holds the named-session presentation lock and has published a
+# version 3 attempt journal. Sets exact response-derived globals:
+#   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID         the child space
+#   FM_BACKEND_HERDR_PROJECTION_TAB_ID               the moved task tab
+#   FM_BACKEND_HERDR_PROJECTION_PANE_ID              the moved task pane
+#   FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID  the project parent space
+#   FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL         that parent's label
+#   FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH        Herdr's checkout path
+#   FM_BACKEND_HERDR_PROJECTION_EXACT                1 only when the child
+#     converged to exactly the task tab and pane under a verified parent, so
+#     an exact restart binding may be published
+# Returns 0 when the task pane now lives in the child space, 2 when nothing was
+# grouped and no Herdr state remains changed, 3 when nothing was grouped but a
+# child space may remain, and 1 when the task pane's identity is uncertain.
+fm_backend_herdr_projection_group_task() {  # <session> <project-dir> <worktree> <staged-workspace> <staged-pane> <workspace-label> <task-label>
+  local session=$1 project=$2 worktree=$3 staged_workspace=$4 staged_pane=$5
+  local workspace_label=$6 task_label=$7
+  local project_root worktree_real root_open panes pane_ids pane state focus_before active_tab
+  local out child seeded_tab seeded_pane checkout checkout_real moved moved_tab info tabs parent
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
-  FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
-  FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=""
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
-  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
+  FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=""
+  FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH=""
+  FM_BACKEND_HERDR_PROJECTION_EXACT=0
 
-  fm_backend_herdr_version_check || return 1
-  session=$(fm_backend_herdr_session)
-  fm_backend_herdr_server_ensure "$session" || return 1
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "error: herdr presentation workspace create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
-    return 1
+  project_root=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) \
+    && project_root=$(fm_backend_herdr_projection_physical_dir "$project_root") \
+    && worktree_real=$(fm_backend_herdr_projection_physical_dir "$worktree") \
+    && [ "$project_root" != "$worktree_real" ] || {
+    echo "warning: herdr project grouping could not resolve distinct project and worktree paths; leaving the worker in its launching space" >&2
+    return 2
   }
-  if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$workspace_label" --no-focus 2>/dev/null); then
-    :
-  else
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace create" || true
-    echo "error: herdr presentation workspace create failed ambiguously; leaving its journal quarantined" >&2
-    return 1
+  if ! fm_backend_herdr_projection_group_worktrees "$session" "$project_root" "$worktree_real"; then
+    echo "warning: herdr project grouping could not find exactly this project and worktree in herdr's worktree list; leaving the worker in its launching space" >&2
+    return 2
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace create" || {
-    echo "error: herdr presentation workspace create did not preserve exact active focus; leaving its journal quarantined" >&2
-    return 1
-  }
-  # shellcheck disable=SC2034  # caller consumes the response-derived global
-  FM_BACKEND_HERDR_PROJECTION_SESSION=$session
-  FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
-  FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-  FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" ] \
-     || [ -z "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" ] \
-     || [ -z "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" ]; then
-    echo "error: herdr presentation workspace create returned incomplete IDs; leaving its journal quarantined" >&2
-    return 1
+  if [ -n "$FM_BACKEND_HERDR_GROUP_WORKTREE_OPEN" ]; then
+    echo "warning: this worktree is already open in herdr space $FM_BACKEND_HERDR_GROUP_WORKTREE_OPEN; leaving the worker in its launching space rather than relabeling that space" >&2
+    return 2
   fi
-
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "error: herdr presentation task-tab create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
-    return 1
-  }
-  if out=$(fm_backend_herdr_cli "$session" tab create \
-    --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
-    --cwd "$cwd" --label "$task_label" --no-focus 2>/dev/null); then
-    :
-  else
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || true
-    echo "error: herdr presentation task-tab create failed ambiguously; leaving its journal quarantined" >&2
-    return 1
-  fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || {
-    echo "error: herdr presentation task-tab create did not preserve exact active focus; leaving its journal quarantined" >&2
-    return 1
-  }
-  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" ]; then
-    echo "error: herdr presentation task-tab create returned incomplete IDs; leaving its journal quarantined" >&2
-    return 1
-  fi
-  # shellcheck disable=SC2034  # caller consumes the same-process cleanup gate
-  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "error: herdr presentation seeded-tab prune could not capture exact active workspace and tab; refusing a focus-unsafe prune" >&2
-    return 1
-  }
-  if ! fm_backend_herdr_workspace_prune_seeded_default_tab \
-    "$session" \
-    "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
-    "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-    focus-preserving; then
-    echo "error: herdr presentation seeded-tab prune refused a focus-unsafe close; leaving its journal quarantined" >&2
-    return 1
-  fi
-  active_tab=${focus_before#*$'\t'}
-  if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" != "$active_tab" ]; then
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
-      echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
-      return 1
-    }
+  root_open=$FM_BACKEND_HERDR_GROUP_ROOT_OPEN
+  if [ -n "$root_open" ]; then
+    if [ "$root_open" = "$staged_workspace" ]; then
+      echo "warning: herdr would make the worker's own launching space its project parent; leaving the worker there so closing the project cannot close the launcher" >&2
+      return 2
+    fi
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$root_open" 2>/dev/null) || tabs=
+    if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      echo "warning: herdr project grouping could not inspect the project parent space's tabs; leaving the worker in its launching space" >&2
+      return 2
+    fi
+    if printf '%s' "$tabs" | jq -e '[.result.tabs[]? | select((.label | type) == "string" and (.label | startswith("fm-")))] | length > 0' >/dev/null 2>&1; then
+      echo "warning: herdr would make a Firstmate home space ($root_open) holding task tabs this project's parent; leaving the worker in its launching space so closing the project cannot close those workers" >&2
+      return 2
+    fi
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$root_open" 2>/dev/null) || panes=
+    if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
+      echo "warning: herdr project grouping could not inspect the project parent space; leaving the worker in its launching space" >&2
+      return 2
+    fi
+    pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id // empty' 2>/dev/null)
+    while IFS= read -r pane; do
+      [ -n "$pane" ] || continue
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      case "$state" in
+        no-agent|dead) ;;
+        *)
+          echo "warning: herdr project parent space $root_open has a $state pane; leaving the worker in its launching space so closing the project cannot close that agent" >&2
+          return 2
+          ;;
+      esac
+    done <<EOF
+$pane_ids
+EOF
   fi
 
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || {
-    echo "error: could not verify the disposable herdr presentation workspace shape" >&2
-    return 1
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr project grouping could not capture exact active workspace and tab; leaving the worker in its launching space" >&2
+    return 2
   }
-  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || {
-    echo "error: could not verify the disposable herdr presentation pane shape" >&2
-    return 1
+  if ! out=$(fm_backend_herdr_cli "$session" worktree open \
+    --cwd "$project_root" --path "$worktree_real" --label "$workspace_label" --no-focus 2>/dev/null); then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "worktree open" || true
+    echo "warning: herdr worktree open failed ambiguously; leaving the worker in its launching space with its grouping journal quarantined" >&2
+    return 3
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "worktree open" || true
+  child=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  seeded_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  seeded_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  checkout=$(printf '%s' "$out" | jq -r '
+    .result
+    | select(.already_open == false and .workspace.worktree.is_linked_worktree == true)
+    | .workspace.worktree.checkout_path // empty
+  ' 2>/dev/null)
+  checkout_real=
+  [ -z "$checkout" ] || checkout_real=$(fm_backend_herdr_projection_physical_dir "$checkout") || checkout_real=
+  if [ -z "$child" ] || [ -z "$seeded_tab" ] || [ -z "$seeded_pane" ] \
+     || [ "$child" = "$staged_workspace" ] || [ "$child" = "$root_open" ] \
+     || [ -z "$checkout_real" ] || [ "$checkout_real" != "$worktree_real" ]; then
+    # Anything but a fresh child for exactly this worktree names a space this
+    # call did not create, so it grants no cleanup authority.
+    echo "warning: herdr worktree open did not return one fresh child space for exactly this worktree; leaving the worker in its launching space with its grouping journal quarantined" >&2
+    return 3
+  fi
+
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr project grouping could not capture exact focus before moving the task terminal; removing the empty child space" >&2
+    fm_backend_herdr_projection_group_rollback "$session" "$seeded_pane" && return 2
+    return 3
   }
-  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
-    echo "error: could not parse the disposable herdr presentation workspace shape" >&2
+  moved=
+  moved_tab=
+  if out=$(fm_backend_herdr_cli "$session" pane move "$staged_pane" \
+    --new-tab --workspace "$child" --label "$task_label" --no-focus 2>/dev/null); then
+    moved=$(printf '%s' "$out" | jq -r --arg staged "$staged_pane" '
+      .result.move_result
+      | select(.previous_pane_id == $staged)
+      | .pane.pane_id // empty
+    ' 2>/dev/null)
+    moved_tab=$(printf '%s' "$out" | jq -r '.result.move_result.pane.tab_id // empty' 2>/dev/null)
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task terminal move" || true
+  if [ -z "$moved" ] || [ -z "$moved_tab" ]; then
+    info=$(fm_backend_herdr_cli "$session" pane get "$staged_pane" 2>/dev/null) || info=
+    if printf '%s' "$info" | jq -e --arg pane "$staged_pane" --arg workspace "$staged_workspace" '
+      .result.pane.pane_id == $pane and .result.pane.workspace_id == $workspace
+    ' >/dev/null 2>&1; then
+      echo "warning: herdr could not move the task terminal into its project space; removing the empty child space and leaving the worker in its launching space" >&2
+      fm_backend_herdr_projection_group_rollback "$session" "$seeded_pane" && return 2
+      return 3
+    fi
+    echo "error: herdr task terminal move had an ambiguous result; the worker's terminal can no longer be identified exactly" >&2
     return 1
   fi
-  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs | length' 2>/dev/null)
-  pane_count=$(printf '%s' "$panes" | jq -r '.result.panes | length' 2>/dev/null)
-  if [ "$tab_count" != 1 ] || [ "$pane_count" != 1 ] \
-     || ! printf '%s' "$tabs" | jq -e --arg task "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-       --arg seeded "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-       '.result.tabs[0].tab_id == $task and ([.result.tabs[] | select(.tab_id == $seeded)] | length) == 0' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" \
-       --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-       '.result.panes[0].pane_id == $pane and .result.panes[0].tab_id == $tab' >/dev/null 2>&1; then
-    echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
+  info=$(fm_backend_herdr_cli "$session" pane get "$moved" 2>/dev/null) || info=
+  if ! printf '%s' "$info" | jq -e --arg pane "$moved" --arg tab "$moved_tab" --arg workspace "$child" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1; then
+    echo "error: herdr task terminal move could not be verified; the worker's terminal can no longer be identified exactly" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$child
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$moved_tab
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$moved
+  FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH=$checkout
+
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || focus_before=
+  if [ -n "$focus_before" ]; then
+    fm_backend_herdr_workspace_prune_seeded_default_tab \
+      "$session" "$child" "$seeded_tab" focus-preserving || true
+    active_tab=${focus_before#*$'\t'}
+    if [ "$seeded_tab" != "$active_tab" ]; then
+      fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || true
+    fi
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$child" 2>/dev/null) || tabs=
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$child" 2>/dev/null) || panes=
+  if ! printf '%s' "$tabs" | jq -e --arg tab "$moved_tab" --arg label "$task_label" '
+       (.result.tabs | type) == "array" and (.result.tabs | length) == 1
+       and .result.tabs[0].tab_id == $tab and .result.tabs[0].label == $label
+     ' >/dev/null 2>&1 \
+     || ! printf '%s' "$panes" | jq -e --arg pane "$moved" --arg tab "$moved_tab" '
+       (.result.panes | type) == "array" and (.result.panes | length) == 1
+       and .result.panes[0].pane_id == $pane and .result.panes[0].tab_id == $tab
+     ' >/dev/null 2>&1; then
+    echo "warning: herdr project space for this worker did not converge to exactly its task terminal; it stays grouped without an exact restart binding" >&2
+    return 0
+  fi
+  if ! fm_backend_herdr_projection_group_worktrees "$session" "$project_root" "$worktree_real"; then
+    echo "warning: herdr project parent could not be re-read; this worker stays grouped without an exact restart binding" >&2
+    return 0
+  fi
+  parent=$FM_BACKEND_HERDR_GROUP_ROOT_OPEN
+  info=
+  if [ -n "$parent" ] && [ "$parent" != "$child" ] && [ "$parent" != "$staged_workspace" ] \
+     && [ "$FM_BACKEND_HERDR_GROUP_WORKTREE_OPEN" = "$child" ]; then
+    info=$(fm_backend_herdr_cli "$session" workspace get "$parent" 2>/dev/null) || info=
+  fi
+  FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=$(printf '%s' "$info" | jq -r --arg parent "$parent" '
+    .result.workspace
+    | select(.workspace_id == $parent and .worktree.is_linked_worktree == false)
+    | .label // empty
+  ' 2>/dev/null)
+  if [ -z "$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL" ] || [ "$checkout" != "$worktree_real" ]; then
+    echo "warning: herdr project parent for this worker could not be verified exactly; it stays grouped without an exact restart binding" >&2
+    return 0
+  fi
+  FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=$parent
+  FM_BACKEND_HERDR_PROJECTION_EXACT=1
   return 0
 }
 
@@ -2602,27 +2600,88 @@ fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-p
   fi
 }
 
-# fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
-# workspace only when its presentation label is unique in the named session.
-fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-label>
-  local session=$1 parent_label=$2 list
+# fm_backend_herdr_projection_group_binding_matches: verify one exact grouped
+# child space - its label, Herdr's own worktree membership for the recorded
+# checkout path, and its single task tab and pane - and that the recorded
+# parent is still that same project's parent space.
+# This read-only predicate grants no mutation authority by itself.
+fm_backend_herdr_projection_group_binding_matches() {  # <session> <workspace> <tab> <pane> <parent-workspace> <workspace-label> <task-label> <checkout-path>
+  local session=$1 workspace=$2 tab=$3 pane=$4 parent_workspace=$5
+  local workspace_label=$6 task_label=$7 checkout=$8 list tabs panes
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$list" | jq -er --arg parent_label "$parent_label" '
-    (.result.workspaces // null) as $spaces
-    | select(($spaces | type) == "array")
-    | [$spaces[]? | select(.label == $parent_label)]
-    | if length == 1
-        and (.[0].workspace_id | type) == "string"
-        and (.[0].workspace_id | length) > 0
-      then .[0].workspace_id
-      else empty
-      end
-  ' 2>/dev/null
+  printf '%s' "$list" | jq -e \
+    --arg workspace "$workspace" \
+    --arg parent_workspace "$parent_workspace" \
+    --arg workspace_label "$workspace_label" \
+    --arg checkout "$checkout" '
+      (.result.workspaces // null) as $spaces
+      | select(($spaces | type) == "array")
+      | [$spaces[]? | select(.workspace_id == $workspace)] as $children
+      | [$spaces[]? | select((.worktree | type) == "object" and .worktree.checkout_path == $checkout)] as $members
+      | [$spaces[]? | select(.workspace_id == $parent_workspace)] as $parents
+      | select(($children | length) == 1 and ($members | length) == 1 and ($parents | length) == 1)
+      | ($children[0]) as $child
+      | ($parents[0]) as $parent
+      | select($members[0].workspace_id == $workspace)
+      | select($child.label == $workspace_label)
+      | select($child.worktree.is_linked_worktree == true)
+      | select(($parent.worktree | type) == "object" and $parent.worktree.is_linked_worktree == false)
+      | select(($child.worktree.repo_key | type) == "string" and $parent.worktree.repo_key == $child.worktree.repo_key)
+    ' >/dev/null 2>&1 || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg task_label "$task_label" '
+    (.result.tabs | type) == "array"
+    and (.result.tabs | length) == 1
+    and .result.tabs[0].tab_id == $tab
+    and .result.tabs[0].label == $task_label
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" '
+    (.result.panes | type) == "array"
+    and (.result.panes | length) == 1
+    and .result.panes[0].pane_id == $pane
+    and .result.panes[0].tab_id == $tab
+  ' >/dev/null 2>&1
 }
 
-# fm_backend_herdr_projection_live_binding_matches: verify one exact projected
-# workspace, its single task tab/pane, its unique token label, and its current
-# position inside the exact parent workspace's contiguous child block.
+# fm_backend_herdr_projection_binding_matches: one exact binding check chosen
+# by journal version - 4 is a grouped child space, 2 a retired flat projection.
+fm_backend_herdr_projection_binding_matches() {  # <session> <version> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> <checkout-path>
+  case "$2" in
+    4) fm_backend_herdr_projection_group_binding_matches "$1" "$4" "$5" "$6" "$7" "$9" "${10}" "${11}" ;;
+    2) fm_backend_herdr_projection_live_binding_matches "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_projection_correlated_workspaces: print every space id in a
+# workspace-list response that a validated journal correlates with - by
+# Herdr's worktree membership for a grouped journal (versions 3 and 4), or by
+# the retired title token for a flat one (versions 1 and 2).
+# Correlation is discovery only and never mutation authority.
+fm_backend_herdr_projection_correlated_workspaces() {  # <workspace-list-json> <version> <token> <checkout-path>
+  local list=$1 version=$2 token=$3 checkout=$4
+  case "$version" in
+    3|4)
+      printf '%s' "$list" | jq -r --arg checkout "$checkout" '
+        .result.workspaces[]?
+        | select((.worktree | type) == "object" and .worktree.checkout_path == $checkout)
+        | .workspace_id
+      ' 2>/dev/null
+      ;;
+    *)
+      printf '%s' "$list" | jq -r --arg suffix " · p:$token" '
+        .result.workspaces[]?
+        | select((.label | type) == "string" and (.label | endswith($suffix)))
+        | .workspace_id
+      ' 2>/dev/null
+      ;;
+  esac
+}
+
+# fm_backend_herdr_projection_live_binding_matches: verify one exact retired
+# flat projected workspace, its single task tab/pane, its unique token label, and
+# its current position inside the exact parent workspace's contiguous child block.
 # This read-only predicate grants no mutation authority by itself.
 fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
@@ -2699,8 +2758,10 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  # Only a retired flat binding is reclaimed in place. A grouped child space
+  # belongs to exactly one worktree, and a re-dispatch acquires a fresh one.
   if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
-    echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
+    echo "warning: herdr presentation journal for $id has no in-place restart binding; spawning flat" >&2
     return 2
   fi
   canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
@@ -2836,18 +2897,21 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   return 0
 }
 
-# fm_backend_herdr_projection_recovery_allows_flat: inspect an existing
-# journal's exact token matches without adopting, reusing, renaming, closing,
+# fm_backend_herdr_projection_recovery_allows_flat: inspect the spaces an
+# existing journal correlates with without adopting, reusing, renaming, closing,
 # or deleting anything.
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
+  local session=$1 journal=$2 id=$3 version token checkout list wsids count wsid panes pane_ids pane state
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
   }
+  version=$FM_BACKEND_HERDR_JOURNAL_VERSION
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  checkout=$FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH
   fm_backend_herdr_server_ensure "$session" || {
     echo "error: could not inspect the quarantined herdr presentation for $id; refusing duplicate launch" >&2
     return 1
@@ -2860,15 +2924,16 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     echo "error: could not parse herdr workspaces while inspecting the quarantined presentation for $id" >&2
     return 1
   fi
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  wsids=$(fm_backend_herdr_projection_correlated_workspaces "$list" "$version" "$token" "$checkout")
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
+  # shellcheck disable=SC2034  # the spawn recovery path reads the verdict
+  FM_BACKEND_HERDR_PROJECTION_RECOVERY_CORRELATED=$count
   if [ "$count" -eq 0 ]; then
-    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
+    echo "warning: no herdr space correlates with the presentation journal for $id; leaving any stale space untouched and spawning flat" >&2
     return 0
   fi
   if [ "$count" -gt 1 ]; then
-    echo "warning: $count exact herdr presentation token matches for $id are quarantined; inspecting only for duplicate-agent risk" >&2
+    echo "warning: $count herdr spaces correlated with the presentation journal for $id are quarantined; inspecting only for duplicate-agent risk" >&2
   fi
   while IFS= read -r wsid; do
     [ -n "$wsid" ] || continue
@@ -2904,15 +2969,16 @@ EOF
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation
 # for retiring a successful projection journal after normal exact-pane
 # teardown.
-# Exactly one token-bearing workspace must match the endpoint workspace.
+# Exactly one correlated workspace must match the endpoint workspace.
 # This verdict never authorizes a Herdr mutation.
 fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace-id> <journal> <task-id>
-  local session=$1 workspace_id=$2 journal=$3 id=$4 token list matches
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  local session=$1 workspace_id=$2 journal=$3 id=$4 list matches
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  matches=$(fm_backend_herdr_projection_correlated_workspaces "$list" \
+    "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_CHECKOUT_PATH")
   [ "$matches" = "$workspace_id" ]
 }
 
@@ -2929,6 +2995,28 @@ fm_backend_herdr_parse_target() {  # <target>
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+}
+
+# fm_backend_herdr_report_display_agent: show <label> (bin/fm-model-labels.sh)
+# as <pane_id>'s agent name in Herdr's sidebar agents column, under the
+# display-only firstmate-model-label metadata source. The pane id must come
+# before the options: Herdr 0.8.2 rejects options placed first with
+# "unknown option". Callers treat a failure as cosmetic.
+fm_backend_herdr_report_display_agent() {  # <session> <pane_id> <label>
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source firstmate-model-label --display-agent "$3"
+}
+
+# fm_backend_herdr_report_worker_mark: tag <workspace_id> with the display-only
+# worker marker token wt, under the firstmate-worker-mark metadata source.
+# Callers pass only a worker's own child space, never a project parent space or
+# firstmate's own space. The workspace id precedes the options for the same
+# Herdr 0.8.2 reason as the pane call above. Callers treat a failure as cosmetic.
+fm_backend_herdr_report_worker_mark() {  # <session> <workspace_id>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  fm_backend_herdr_cli "$1" workspace report-metadata "$2" \
+    --source firstmate-worker-mark --token 'wt=●'
 }
 
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
