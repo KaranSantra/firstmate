@@ -143,9 +143,14 @@ herdr_target() {  # <id>
 # shown, so a refusal is retried on the next interval rather than on every poll
 # and rather than never again.
 publish() {  # <id> <marker>
-  local target session pane
+  local target
   target=$(herdr_target "$1")
   [ -n "$target" ] || return 0
+  publish_target "$target" "$2"
+}
+
+publish_target() {  # <session>\t<pane> <marker>
+  local target=$1 session pane
   session=${target%%	*}
   pane=${target#*	}
   fm_backend_source herdr 2>/dev/null || return 1
@@ -178,7 +183,7 @@ write_record() {  # <id> <epoch> <marker>
 }
 
 cmd_update() {  # <id>
-  local id=${1:-} now marker shown target lock
+  local id=${1:-} now marker shown target current lock
   case "$id" in
     '' | */* | .*) die "update needs a task id" 2 ;;
   esac
@@ -188,6 +193,11 @@ cmd_update() {  # <id>
   [ -n "$target" ] || return 0
   lock=$(update_lock_path "$id")
   fm_lock_try_acquire "$lock" || return 0
+  current=$(herdr_target "$id")
+  if [ "$current" != "$target" ]; then
+    fm_lock_release "$lock" || true
+    return 0
+  fi
   read_record "$id"
   now=$(now_epoch)
   if [ "$REC_AT" -gt 0 ] && [ $((now - REC_AT)) -lt "$INTERVAL" ]; then
@@ -195,8 +205,13 @@ cmd_update() {  # <id>
     return 0
   fi
   marker=$(marker_for "$id")
+  current=$(herdr_target "$id")
+  if [ "$current" != "$target" ]; then
+    fm_lock_release "$lock" || true
+    return 0
+  fi
   shown=$REC_MARKER
-  if [ "$marker" = "$REC_MARKER" ] || publish "$id" "$marker"; then
+  if [ "$marker" = "$REC_MARKER" ] || publish_target "$target" "$marker"; then
     shown=$marker
   fi
   write_record "$id" "$now" "$shown"
