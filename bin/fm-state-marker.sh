@@ -8,9 +8,11 @@
 #   fm-state-marker.sh state <task-id>
 #
 # update reads the task's CURRENT pipeline state, turns it into one short
-# display marker, and reports that marker on the task's own pane. It is the
-# only writer of that marker. clear removes it. state prints the marker update
-# would show, for tests and for reading a decision without touching Herdr.
+# display marker, and reports that marker on the task's own pane.
+# It is the only writer of that marker.
+# clear requests its removal.
+# state prints the marker update it would show.
+# It supports tests and decision reads without touching Herdr.
 #
 # Why this exists: since the review moved inside the validation pipeline it runs
 # headlessly, with no terminal of its own, so nothing represents it in the
