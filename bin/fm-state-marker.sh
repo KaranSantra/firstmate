@@ -204,12 +204,15 @@ cmd_update() {  # <id>
 }
 
 cmd_clear() {  # <id>
-  local id=${1:-}
+  local id=${1:-} lock
   case "$id" in
     '' | */* | .*) die "clear needs a task id" 2 ;;
   esac
+  lock=$(update_lock_path "$id")
+  fm_lock_acquire_wait "$lock"
   publish "$id" ""
   rm -f "$(record_path "$id")" 2>/dev/null
+  fm_lock_release "$lock" || true
 }
 
 cmd_state() {  # <id>
