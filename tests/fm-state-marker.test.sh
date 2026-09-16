@@ -273,6 +273,26 @@ fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 
   herdr_pane_id=w1:p1 kind=ship
 pass "retire: teardown cannot leave a stale refresh record"
 
+reset_logs
+rm -f "$STATE_DIR/t.state-marker"
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 FM_FAKE_CREW_DELAY=1 &
+repointed_update=$!
+i=0
+while [ "$(crew_calls)" -lt 1 ]; do
+  [ "$i" -lt 30 ] || fail "the repointed refresh never began its state read"
+  sleep 0.1
+  i=$((i + 1))
+done
+fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s4 \
+  herdr_pane_id=w4:p4 kind=ship
+wait "$repointed_update" || fail "the repointed refresh failed"
+assert_equals 0 "$(herdr_calls)" "a refresh never publishes onto a repointed row"
+[ ! -e "$STATE_DIR/t.state-marker" ] || fail "a repointed refresh wrote a marker record"
+fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 \
+  herdr_pane_id=w1:p1 kind=ship
+pass "update: a changed endpoint abandons the stale refresh"
+
 # --- quiet degradation -------------------------------------------------------
 
 # No other runtime has this sidebar, so a non-herdr task must never reach Herdr -
