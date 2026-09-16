@@ -195,6 +195,31 @@ marker_run update t FM_STATE_MARKER_INTERVAL=0
 assert_equals 0 "$(herdr_calls)" "an already-clear row is not cleared again"
 pass "update: clearing is not repeated once the row is clear"
 
+reset_logs
+rm -f "$STATE_DIR/t.state-marker.error"
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=0 >/dev/null
+record_before=$(cat "$STATE_DIR/t.state-marker")
+reset_logs
+cat > "$HOME_DIR/config/model-labels.toml" <<'TOML'
+[states.glyphs]
+review = "abc"
+TOML
+err="$TMP_ROOT/marker-lookup.err"
+marker_run update t FM_STATE_MARKER_INTERVAL=0 2>"$err"
+assert_equals 0 "$(herdr_calls)" "an invalid marker lookup never clears the existing row"
+assert_equals "$record_before" "$(cat "$STATE_DIR/t.state-marker")" \
+  "an invalid marker lookup leaves the confirmed record untouched"
+assert_contains "$(cat "$err")" "state marker t: marker lookup failed" \
+  "an invalid marker lookup reports a bounded diagnostic"
+marker_run update t FM_STATE_MARKER_INTERVAL=0 2>"$err"
+assert_equals "" "$(cat "$err")" "an unchanged marker lookup failure is reported once"
+rm -f "$HOME_DIR/config/model-labels.toml"
+marker_run update t FM_STATE_MARKER_INTERVAL=0 2>"$err"
+assert_equals "" "$(cat "$err")" "a recovered marker lookup stays quiet"
+[ ! -e "$STATE_DIR/t.state-marker.error" ] || fail "a recovered marker lookup retained its diagnostic"
+pass "update: an invalid lookup preserves the review marker"
+
 # --- clear -------------------------------------------------------------------
 
 reset_logs
