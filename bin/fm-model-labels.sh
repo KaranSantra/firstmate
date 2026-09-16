@@ -72,10 +72,10 @@
 #   [effort.aliases]             <effort word> = "<short alias>"
 #   [states.glyphs]              <pipeline state> = "<marker>"
 # A recorded model name claimed by more than one [models] entry is an error.
-# A marker longer than GLYPH_MAX_CHARS below is an error, because the sidebar
-# row is horizontally tight and that limit is the whole point of a marker. A
-# state name this release does not report is a warning, never a failure, so the
-# lookup survives a pipeline that renames or adds a step.
+# A marker must start with a symbol or emoji and cannot be longer than
+# GLYPH_MAX_CHARS below, because the sidebar row is horizontally tight. A state
+# name this release does not report is a warning, never a failure, so the lookup
+# survives a pipeline that renames or adds a step.
 #
 # The catalog info report reads only table rows whose first cell is a single
 # `model` and list lines that are a single `model`.
@@ -109,6 +109,7 @@ model_labels_py() {
 import os
 import re
 import sys
+import unicodedata
 
 BARE = re.compile(r"[A-Za-z0-9_-]+")
 SCALAR = re.compile(r"[+-]?[0-9]+|true|false")
@@ -274,6 +275,10 @@ def nonempty_string(v):
     return isinstance(v, str) and v.strip() != ""
 
 
+def marker_prefix_is_symbol(v):
+    return bool(v) and unicodedata.category(v[0])[0] in ("P", "S")
+
+
 def validate(doc):
     errors, warnings = [], []
     for key in doc:
@@ -357,6 +362,8 @@ def validate(doc):
                     "%s is %d characters; a marker is a symbol plus at most two characters (%d max) because the sidebar row is tight"
                     % (where, len(glyph), GLYPH_MAX_CHARS)
                 )
+            if not marker_prefix_is_symbol(glyph):
+                errors.append("%s must begin with a symbol or emoji" % where)
             if name not in DEFAULT_STATE_GLYPHS:
                 warnings.append("%s names no pipeline state this release reports" % where)
     return errors, warnings

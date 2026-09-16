@@ -42,6 +42,7 @@ cat > "$CREW_BIN" <<'SH'
 #!/usr/bin/env bash
 printf '%s state=%s home=%s\n' "$1" "${FM_STATE_OVERRIDE:-unset}" "${FM_HOME:-unset}" \
   >> "$FM_FAKE_CREW_LOG"
+sleep "${FM_FAKE_CREW_DELAY:-0}"
 cat "$FM_FAKE_CREW_LINE"
 SH
 chmod +x "$CREW_BIN"
@@ -83,6 +84,8 @@ crew_calls() {
 fm_write_meta "$STATE_DIR/t.meta" window=fm:fm-t backend=herdr herdr_session=s1 \
   herdr_pane_id=w1:p1 kind=ship
 fm_write_meta "$STATE_DIR/tmux-task.meta" window=fm:fm-tmux kind=ship
+fm_write_meta "$STATE_DIR/local-secondmate.meta" window=fm:fm-local-secondmate backend=herdr herdr_session=s2 \
+  herdr_pane_id=w2:p2 kind=secondmate
 fm_write_meta "$STATE_DIR/remote.meta" window=fm:fm-remote backend=herdr herdr_session=s9 \
   herdr_pane_id=w9:p9 remote_host=example-host kind=secondmate
 
@@ -151,6 +154,23 @@ assert_equals 0 "$(crew_calls)" "no state read inside the interval"
 assert_equals 0 "$(herdr_calls)" "and therefore no Herdr call either"
 pass "update: the interval suppresses the state read the cost guard warns about"
 
+reset_logs
+rm -f "$STATE_DIR/t.state-marker"
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update t FM_STATE_MARKER_INTERVAL=3600 FM_FAKE_CREW_DELAY=1 &
+slow_update=$!
+i=0
+while [ "$(crew_calls)" -lt 1 ]; do
+  [ "$i" -lt 30 ] || fail "the first marker update never began its state read"
+  sleep 0.1
+  i=$((i + 1))
+done
+marker_run update t FM_STATE_MARKER_INTERVAL=3600
+wait "$slow_update" || fail "the first marker update failed"
+assert_equals 1 "$(crew_calls)" "concurrent updates make one state read per interval"
+assert_equals 1 "$(herdr_calls)" "concurrent updates publish one marker"
+pass "update: concurrent refreshes preserve the per-task cadence"
+
 # A changed step repaints the row.
 reset_logs
 say 'state: working · source: run-step · validating (running: test)'
@@ -207,6 +227,15 @@ marker_run update remote FM_STATE_MARKER_INTERVAL=0
 assert_equals 0 "$(crew_calls)" "a remote task's state is never read for a marker"
 assert_equals 0 "$(herdr_calls)" "a remote task makes no local Herdr call"
 pass "degrade: a remote task never pays for a marker it cannot show"
+
+reset_logs
+say 'state: working · source: run-step · validating (running: review)'
+marker_run update local-secondmate FM_STATE_MARKER_INTERVAL=0
+assert_equals 1 "$(crew_calls)" "a local secondmate reads its pipeline state"
+assert_equals "$(joined pane report-metadata w2:p2 --source firstmate-state-marker \
+  --token 'st=◆cx' --session s2)" "$(sed -n 1p "$HERDR_LOG")" \
+  "a local secondmate publishes its marker to its own row"
+pass "degrade: a local secondmate receives its lane marker"
 
 # An unknown task is a no-op, not an error.
 reset_logs
