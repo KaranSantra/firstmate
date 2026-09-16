@@ -2303,10 +2303,10 @@ EOF
     # once per FM_STATE_MARKER_INTERVAL per task and shows the last known marker
     # in between, which is what keeps bin/fm-classify-lib.sh's "never every
     # wake" cost guard intact while this loop still runs every poll. Cosmetic
-    # and silent: a failure never changes triage below.
+    # and non-fatal: a failure never changes triage below.
     if [ -n "$task" ]; then
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null 2>&1 &
+        "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null &
     fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
