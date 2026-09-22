@@ -470,12 +470,13 @@ Every other state shows nothing until `[states.glyphs]` gives it a marker, and t
 Each marker is at most three characters, letters allowed, because the row is horizontally tight.
 Its keys are the pipeline's own step names - `intent`, `review`, `test`, `lint`, `document`, `push`, `pr`, and `ci` - plus `fix` for an auto-fix round and `decision` for a lane held for an answer.
 `bin/fm-model-labels.sh check` warns on a key outside that set, so a typo is caught rather than silently ignored, and `bin/fm-model-labels.sh marker <key>` prints the marker any key currently resolves to.
-The `rvx` default ships with the script, so the review marker works before the file exists; a lookup that cannot be parsed, or that sets a marker longer than the limit, shows no marker and says why rather than quietly showing the wrong one.
+The `rvx` default ships with the script, so the review marker works before the file exists; a lookup that cannot be parsed, or that sets a marker longer than the limit, leaves the existing row and marker record unchanged and says why rather than quietly showing the wrong one.
 
 The marker is read from the same current pipeline state `bin/fm-crew-state.sh` already resolves, never from a second reader of the validation tool.
 That read is not free, so `bin/fm-state-marker.sh` bounds it to once per task per `FM_STATE_MARKER_INTERVAL` seconds (default 60) and shows the last known marker in between; a marker that has not changed makes no Herdr call at all.
 A marker that outlived its run would be worse than none, so anything that is not a live pipeline step clears it, and teardown drops the record with the rest of the task.
-An unknown, absent, or unreadable state shows nothing at all rather than a placeholder, a non-Herdr backend is a silent no-op, and a Herdr that will not take the call leaves the row exactly as it was and is retried on the next interval rather than on every poll.
+An unknown or absent state shows nothing at all rather than a placeholder, while an unreadable state leaves the existing row and marker record unchanged and emits one bounded diagnostic until it recovers.
+A non-Herdr backend is a silent no-op, and a Herdr that will not take the call leaves the row exactly as it was and is retried on the next interval rather than on every poll.
 
 ## Toolchain
 
