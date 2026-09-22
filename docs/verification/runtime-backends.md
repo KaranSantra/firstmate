@@ -1457,7 +1457,7 @@ A second writer of `--display-agent` would instead have had to re-send the whole
 
 What this evidence does NOT cover: where Herdr draws a pane token in its sidebar, and how wide those glyphs render.
 The lab viewer attaches a real foreground client but drains its pty without capturing it (`bin/fm-herdr-lab-viewer.py`), so no rendered screen can be read back here.
-The glyph set is therefore chosen from the Geometric Shapes block already proven in this sidebar by the worker-space marker's own `wt=●` token, and every glyph is overridable in `config/model-labels.toml` without a code change.
+The one shipped default, `rvx` for the review, is therefore plain ASCII, whose width does not depend on how a terminal renders symbols, and every marker is overridable in `config/model-labels.toml` without a code change.
 
 ## Zellij
 

@@ -92,9 +92,33 @@ fm_write_meta "$STATE_DIR/remote.meta" window=fm:fm-remote backend=herdr herdr_s
 # --- which states earn a marker ----------------------------------------------
 
 # The captain's own ask: a lane sitting with the reviewer must be readable from
-# the row, and must be distinguishable from one running tests or writing docs.
+# the row. Out of the box that is the only marker; every other step stays bare.
+say 'state: working · source: run-step · validating (running: review)'
+assert_equals "rvx" "$(marker_run state t)" "a lane with the reviewer shows the review marker"
+for detail in \
+  "validating (running: test)" \
+  "validating (fixing: review)" \
+  "ci running"; do
+  say "state: working · source: run-step · $detail"
+  assert_equals "" "$(marker_run state t)" "\"$detail\" shows nothing by default"
+done
+say 'state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+assert_equals "" "$(marker_run state t)" "a lane held for an answer shows nothing by default"
+pass "state: out of the box only the review is marked"
+
+# Each step reads differently once the lookup gives it a glyph, so the captain
+# can mark more states without a code change.
+cat > "$HOME_DIR/config/model-labels.toml" <<'TOML'
+[states.glyphs]
+test = "◉ts"
+document = "◎dc"
+push = "▲ps"
+fix = "◈fx"
+ci = "◌ci"
+decision = "◍?"
+TOML
 for pair in \
-  "validating (running: review)=◆cx" \
+  "validating (running: review)=rvx" \
   "validating (running: test)=◉ts" \
   "validating (running: document)=◎dc" \
   "validating (running: push)=▲ps" \
@@ -107,7 +131,8 @@ for pair in \
 done
 say 'state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
 assert_equals "◍?" "$(marker_run state t)" "a lane held for an answer shows the decision marker"
-pass "state: each pipeline step the captain named reads differently"
+rm -f "$HOME_DIR/config/model-labels.toml"
+pass "state: each configured pipeline step reads differently"
 
 # Anything that is not a live pipeline step shows NOTHING. A pane-derived or
 # log-derived verdict says the worker is busy, not which step owns it, and
@@ -134,7 +159,7 @@ rm -f "$STATE_DIR/t.state-marker"
 say 'state: working · source: run-step · validating (running: review)'
 marker_run update t
 assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
-  --token 'st=◆cx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
+  --token 'st=rvx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
   "the first update publishes the marker under its own source"
 assert_equals 1 "$(herdr_calls)" "one publish, not more"
 pass "update: a new marker reaches the row"
@@ -173,8 +198,13 @@ pass "update: concurrent refreshes preserve the per-task cadence"
 
 # A changed step repaints the row.
 reset_logs
+cat > "$HOME_DIR/config/model-labels.toml" <<'TOML'
+[states.glyphs]
+test = "◉ts"
+TOML
 say 'state: working · source: run-step · validating (running: test)'
 marker_run update t FM_STATE_MARKER_INTERVAL=0
+rm -f "$HOME_DIR/config/model-labels.toml"
 assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
   --token 'st=◉ts' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
   "a changed step publishes the new marker"
@@ -203,7 +233,7 @@ record_before=$(cat "$STATE_DIR/t.state-marker")
 reset_logs
 cat > "$HOME_DIR/config/model-labels.toml" <<'TOML'
 [states.glyphs]
-review = "abc"
+review = "abcd"
 TOML
 err="$TMP_ROOT/marker-lookup.err"
 marker_run update t FM_STATE_MARKER_INTERVAL=0 2>"$err"
@@ -244,7 +274,7 @@ case "$recorded_at" in
   '' | *[!0-9]*) fail "a refused clear did not preserve the last-read timestamp" ;;
 esac
 assert_equals 0 "$recorded_confirmed" "a refused clear leaves the shown marker unconfirmed"
-assert_equals '◆cx' "$recorded_marker" "a refused clear preserves the shown marker for retry"
+assert_equals 'rvx' "$recorded_marker" "a refused clear preserves the shown marker for retry"
 reset_logs
 say 'state: done · source: run-step · checks green: PR ready for review'
 marker_run update t FM_STATE_MARKER_INTERVAL=0
@@ -262,7 +292,7 @@ reset_logs
 say 'state: working · source: run-step · validating (running: review)'
 marker_run update t FM_STATE_MARKER_INTERVAL=0
 assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
-  --token 'st=◆cx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
+  --token 'st=rvx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
   "a recovered review republishes its unconfirmed matching marker"
 pass "clear: a recovered review row is labeled again"
 
@@ -360,7 +390,7 @@ say 'state: working · source: run-step · validating (running: review)'
 marker_run update local-secondmate FM_STATE_MARKER_INTERVAL=0
 assert_equals 1 "$(crew_calls)" "a local secondmate reads its pipeline state"
 assert_equals "$(joined pane report-metadata w2:p2 --source firstmate-state-marker \
-  --token 'st=◆cx' --session s2)" "$(sed -n 1p "$HERDR_LOG")" \
+  --token 'st=rvx' --session s2)" "$(sed -n 1p "$HERDR_LOG")" \
   "a local secondmate publishes its marker to its own row"
 pass "degrade: a local secondmate receives its lane marker"
 
@@ -396,7 +426,7 @@ pass "degrade: a refused call is not retried every poll"
 reset_logs
 marker_run update t FM_STATE_MARKER_INTERVAL=0
 assert_equals "$(joined pane report-metadata w1:p1 --source firstmate-state-marker \
-  --token 'st=◆cx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
+  --token 'st=rvx' --session s1)" "$(sed -n 1p "$HERDR_LOG")" \
   "the marker Herdr refused is published once Herdr accepts it again"
 pass "degrade: a recovered Herdr gets the marker without a state change"
 

@@ -4932,7 +4932,7 @@ test_marker_lookup_error_reaches_watcher_stderr_once() {
   mkdir -p "$dir/config"
   cat > "$dir/config/model-labels.toml" <<'TOML'
 [states.glyphs]
-review = "abc"
+review = "abcd"
 TOML
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash

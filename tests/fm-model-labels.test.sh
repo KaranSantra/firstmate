@@ -218,13 +218,17 @@ marker() {  # <state key> [env assignments...] -> marker on stdout, stderr in $E
   env FM_HOME="$HOME_DIR" "$@" "$SCRIPT" marker "$key" 2>"$ERR"
 }
 
-# Shipped defaults mean the sidebar marker works before the captain has written
-# a single line of lookup: this file has no [states] table at all.
-assert_equals "◆cx" "$(marker review)" "review shows the reviewer's default marker"
-assert_equals "◈fx" "$(marker fix)" "a fix round shows its default marker"
-assert_equals "◌ci" "$(marker ci)" "ci shows its default marker"
-assert_equals "◍?" "$(marker decision)" "a lane held for an answer shows its default marker"
-pass "marker: shipped defaults render with no lookup entry"
+# The shipped default means the review marker works before the captain has
+# written a single line of lookup: this file has no [states] table at all.
+assert_equals "rvx" "$(marker review)" "review shows the reviewer's default marker"
+pass "marker: the shipped review default renders with no lookup entry"
+
+# Only the review ships a marker; every other state stays bare until the
+# lookup gives it one.
+for key in intent test lint document push pr ci fix decision; do
+  assert_equals "" "$(marker "$key")" "$key shows nothing by default"
+done
+pass "marker: every state but the review is unmarked by default"
 
 # Nothing at all for a state this release does not mark - never a placeholder.
 assert_equals "" "$(marker nosuchstate)" "an unmarked state shows nothing"
@@ -236,15 +240,15 @@ cat > "$STATES_OK" <<'TOML'
 schema = 1
 
 [states.glyphs]
-review = "@cl"
-test = "%tt"
+review = "rvc"
+test = "◉ts"
 TOML
-assert_equals "@cl" "$(marker review FM_MODEL_LABELS_FILE="$STATES_OK")" \
+assert_equals "rvc" "$(marker review FM_MODEL_LABELS_FILE="$STATES_OK")" \
   "a configured glyph replaces the default"
-assert_equals "%tt" "$(marker test FM_MODEL_LABELS_FILE="$STATES_OK")" \
-  "a second configured glyph replaces its default"
-assert_equals "◌ci" "$(marker ci FM_MODEL_LABELS_FILE="$STATES_OK")" \
-  "an unconfigured state keeps its shipped default"
+assert_equals "◉ts" "$(marker test FM_MODEL_LABELS_FILE="$STATES_OK")" \
+  "a configured glyph marks a state that has no default"
+assert_equals "" "$(marker ci FM_MODEL_LABELS_FILE="$STATES_OK")" \
+  "an unconfigured state stays unmarked"
 pass "marker: the lookup overrides a glyph without a code change"
 
 assert_contains "$(check_file "$STATES_OK")" "ok:" "a valid states table checks clean"
@@ -275,7 +279,7 @@ rc=0
 out=$(marker review FM_MODEL_LABELS_FILE="$STATES_LONG") || rc=$?
 expect_code 1 "$rc" "an over-long glyph fails the marker"
 assert_equals "" "$out" "an over-long glyph shows nothing"
-assert_contains "$(check_file "$STATES_LONG")" "symbol plus at most two characters" \
+assert_contains "$(check_file "$STATES_LONG")" "at most 3 characters" \
   "check names the horizontal-space limit it enforced"
 pass "marker: an over-long glyph is refused with the reason"
 
@@ -287,13 +291,26 @@ schema = 1
 [states.glyphs]
 review = "abc"
 TOML
+assert_equals "abc" "$(marker review FM_MODEL_LABELS_FILE="$STATES_LETTERS")" \
+  "an all-letter glyph within the limit is shown"
+assert_contains "$(check_file "$STATES_LETTERS")" "ok:" "an all-letter glyph checks clean"
+pass "marker: letters are allowed in a glyph"
+
+STATES_BLANK="$TMP_ROOT/states-blank.toml"
+cat > "$STATES_BLANK" <<'TOML'
+[meta]
+schema = 1
+
+[states.glyphs]
+review = "  "
+TOML
 rc=0
-out=$(marker review FM_MODEL_LABELS_FILE="$STATES_LETTERS") || rc=$?
-expect_code 1 "$rc" "an all-letter glyph fails the marker"
-assert_equals "" "$out" "an all-letter glyph shows nothing"
-assert_contains "$(check_file "$STATES_LETTERS")" "must begin with a symbol or emoji" \
-  "check names the required marker prefix"
-pass "marker: a non-symbol glyph is refused with the reason"
+out=$(marker review FM_MODEL_LABELS_FILE="$STATES_BLANK") || rc=$?
+expect_code 1 "$rc" "a blank glyph fails the marker"
+assert_equals "" "$out" "a blank glyph shows nothing"
+assert_contains "$(check_file "$STATES_BLANK")" "must be a non-empty string" \
+  "check names the blank glyph"
+pass "marker: a blank glyph is refused with the reason"
 
 STATES_UNKNOWN="$TMP_ROOT/states-unknown.toml"
 cat > "$STATES_UNKNOWN" <<'TOML'
