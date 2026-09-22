@@ -3034,13 +3034,17 @@ fm_backend_herdr_target_ready() {  # <target>
 
 # fm_backend_herdr_report_display_agent: show <label> (bin/fm-model-labels.sh)
 # as <pane_id>'s agent name in Herdr's sidebar agents column, under the
-# display-only firstmate-model-label metadata source. The pane id must come
-# before the options: Herdr 0.8.2 rejects options placed first with
-# "unknown option". Callers treat a failure as cosmetic.
+# display-only firstmate-model-label metadata source.
+# Report both Herdr's display-agent field and the agent template token so local
+# sidebar rows that render {token = "agent"} do not depend on Herdr knowing the
+# adapter's native model/effort dictionaries.
+# The pane id must come before the options: Herdr 0.8.2 rejects options placed
+# first with "unknown option".
+# Callers treat a failure as cosmetic.
 fm_backend_herdr_report_display_agent() {  # <session> <pane_id> <label>
   [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
   fm_backend_herdr_cli "$1" pane report-metadata "$2" \
-    --source firstmate-model-label --display-agent "$3"
+    --source firstmate-model-label --display-agent "$3" --token "agent=$3"
 }
 
 # fm_backend_herdr_report_worker_mark: tag <workspace_id> with the display-only
