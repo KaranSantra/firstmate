@@ -5,12 +5,14 @@
 # Usage:
 #   fm-state-marker.sh update <task-id>
 #   fm-state-marker.sh clear <task-id>
+#   fm-state-marker.sh retire <task-id>
 #   fm-state-marker.sh state <task-id>
 #
 # update reads the task's CURRENT pipeline state, turns it into one short
 # display marker, and reports that marker on the task's own pane.
 # It is the only writer of that marker.
 # clear requests its removal.
+# retire drops the record after the task endpoint is gone.
 # state prints the marker update it would show.
 # It supports tests and decision reads without touching Herdr.
 #
@@ -25,15 +27,18 @@
 # FM_STATE_MARKER_INTERVAL seconds (default 60) per task, and shows the last
 # known marker in between. A caller may run it every poll; the interval, not the
 # caller, bounds the cost. One read per task per interval is the ceiling, and a
-# marker that has not changed makes no Herdr call at all.
+# confirmed marker that has not changed makes no Herdr call at all. A marker
+# that is not confirmed is retried even when its value has not changed.
 #
 # STALENESS. A marker that still claimed a lane was in review once it was not
 # would be worse than no marker, so every state that is not a live pipeline step
 # clears it, and bin/fm-teardown.sh drops the record with the rest of the task.
 # Only a working or parked run-step verdict ever shows a marker.
 #
-# Unknown or absent state shows nothing at all rather than a placeholder. A
-# task with no local Herdr row - another runtime, or a remote
+# Unknown or absent state shows nothing at all rather than a placeholder.
+# An unreadable state or marker lookup leaves the existing row and record
+# untouched and emits one bounded diagnostic until it recovers.
+# A task with no local Herdr row - another runtime, or a remote
 # secondmate whose row is on another machine - is excluded before any state is
 # read, so it never pays for an answer that has nowhere to land. A Herdr that
 # rejects the call, or no Herdr at all, leaves the row exactly as it was and

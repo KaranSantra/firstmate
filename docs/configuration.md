@@ -460,7 +460,8 @@ It is display only: no dispatch step reads it, so it never changes which harness
 Update the file only when the captain asks, then run `bin/fm-model-labels.sh check`; that script's header owns the accepted syntax, the full schema, and the label and marker rules.
 
 On the Herdr backend, `bin/fm-spawn.sh` uses the aliases after every launch and relaunch to show the worker's runtime, model, and effort beside the agent name, for example `claude · opus5 · hi`.
-A model with no alias shows its recorded name without a leading provider path or runtime prefix, so a row reads `claude · opus-5-5`, never `claude · claude-opus-5-5`; an effort with no alias shows its raw name, and a failure to set the label warns once without affecting the worker.
+A model with no alias drops a leading provider path and runtime prefix when that leaves a name, so a row reads `claude · opus-5-5` rather than `claude · claude-opus-5-5`; a name that would become empty stays whole.
+An effort with no alias shows its raw name, and a failure to set the label warns once without affecting the worker.
 
 The marker answers a question the sidebar could not otherwise answer.
 Since the code review moved inside the validation pipeline it runs headlessly, in its own checkout, with no terminal of its own, so nothing represents it in the sidebar the way a worker's own row does.
@@ -473,7 +474,8 @@ Its keys are the pipeline's own step names - `intent`, `review`, `test`, `lint`,
 The `rvx` default ships with the script, so the review marker works before the file exists; a lookup that cannot be parsed, or that sets a marker longer than the limit, leaves the existing row and marker record unchanged and says why rather than quietly showing the wrong one.
 
 The marker is read from the same current pipeline state `bin/fm-crew-state.sh` already resolves, never from a second reader of the validation tool.
-That read is not free, so `bin/fm-state-marker.sh` bounds it to once per task per `FM_STATE_MARKER_INTERVAL` seconds (default 60) and shows the last known marker in between; a marker that has not changed makes no Herdr call at all.
+That read is not free, so `bin/fm-state-marker.sh` bounds it to once per task per `FM_STATE_MARKER_INTERVAL` seconds (default 60) and shows the last known marker in between.
+A marker that is confirmed shown and has not changed makes no Herdr call, while an unconfirmed marker is retried even when its value matches.
 A marker that outlived its run would be worse than none, so anything that is not a live pipeline step clears it, and teardown drops the record with the rest of the task.
 An unknown or absent state shows nothing at all rather than a placeholder, while an unreadable state leaves the existing row and marker record unchanged and emits one bounded diagnostic until it recovers.
 A non-Herdr backend is a silent no-op, and a Herdr that will not take the call leaves the row exactly as it was and is retried on the next interval rather than on every poll.
