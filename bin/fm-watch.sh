@@ -762,6 +762,16 @@ surface_endpoints_lost() {
   wake "$reason"
 }
 
+refresh_state_markers_detached() {
+  local w task
+  while IFS= read -r w; do
+    task=$(window_to_task "$w" "$STATE")
+    [ -n "$task" ] || continue
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null &
+  done < <(recorded_windows)
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -2169,6 +2179,7 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  refresh_state_markers_detached
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -2298,16 +2309,6 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    # Refresh this lane's sidebar marker naming what currently holds it. The
-    # helper, not this loop, owns the cadence: it reads pipeline state at most
-    # once per FM_STATE_MARKER_INTERVAL per task and shows the last known marker
-    # in between, which is what keeps bin/fm-classify-lib.sh's "never every
-    # wake" cost guard intact while this loop still runs every poll. Cosmetic
-    # and non-fatal: a failure never changes triage below.
-    if [ -n "$task" ]; then
-      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null &
-    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
