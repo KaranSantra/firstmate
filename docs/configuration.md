@@ -460,7 +460,7 @@ It is display only: no dispatch step reads it, so it never changes which harness
 Update the file only when the captain asks, then run `bin/fm-model-labels.sh check`; that script's header owns the accepted syntax, the full schema, and the label and marker rules.
 
 On the Herdr backend, `bin/fm-spawn.sh` uses the aliases after every launch and relaunch to show the worker's runtime, model, and effort beside the agent name, for example `claude · opus5 · hi`.
-An unknown model or effort shows its raw recorded name, and a failure to set the label warns once without affecting the worker.
+A model with no alias shows its recorded name without a leading provider path or runtime prefix, so a row reads `claude · opus-5-5`, never `claude · claude-opus-5-5`; an effort with no alias shows its raw name, and a failure to set the label warns once without affecting the worker.
 
 The marker answers a question the sidebar could not otherwise answer.
 Since the code review moved inside the validation pipeline it runs headlessly, in its own checkout, with no terminal of its own, so nothing represents it in the sidebar the way a worker's own row does.
