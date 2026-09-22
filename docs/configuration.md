@@ -464,12 +464,13 @@ An unknown model or effort shows its raw recorded name, and a failure to set the
 
 The marker answers a question the sidebar could not otherwise answer.
 Since the code review moved inside the validation pipeline it runs headlessly, in its own checkout, with no terminal of its own, so nothing represents it in the sidebar the way a worker's own row does.
-The lane's own row is therefore the only place it can be shown, and `bin/fm-state-marker.sh` puts a short marker there naming what holds that lane right now: the review, a fix round, tests, documentation, a push, CI, or a decision the captain owes.
-Each marker is a symbol plus at most two characters, because the row is horizontally tight, and `[states.glyphs]` overrides any of them without a code change.
+The lane's own row is therefore the only place it can be shown, and `bin/fm-state-marker.sh` puts a short marker there naming what holds that lane right now.
+Out of the box only the review is marked, as `rvx` - `rv` for review and `x` for the Codex reviewer - because which lane is with the reviewer is the thing worth seeing; change that entry if the configured reviewer changes.
+Every other state shows nothing until `[states.glyphs]` gives it a marker, and the same table overrides `rvx` without a code change.
+Each marker is at most three characters, letters allowed, because the row is horizontally tight.
 Its keys are the pipeline's own step names - `intent`, `review`, `test`, `lint`, `document`, `push`, `pr`, and `ci` - plus `fix` for an auto-fix round and `decision` for a lane held for an answer.
 `bin/fm-model-labels.sh check` warns on a key outside that set, so a typo is caught rather than silently ignored, and `bin/fm-model-labels.sh marker <key>` prints the marker any key currently resolves to.
-The review marker also names the reviewing agent, because which agent holds the lane is the thing worth seeing; change that one entry if the configured reviewer changes.
-Defaults ship with the script, so the marker works before the file exists; a lookup that cannot be parsed, or that sets a glyph longer than the limit, shows no marker and says why rather than quietly showing the wrong one.
+The `rvx` default ships with the script, so the review marker works before the file exists; a lookup that cannot be parsed, or that sets a marker longer than the limit, shows no marker and says why rather than quietly showing the wrong one.
 
 The marker is read from the same current pipeline state `bin/fm-crew-state.sh` already resolves, never from a second reader of the validation tool.
 That read is not free, so `bin/fm-state-marker.sh` bounds it to once per task per `FM_STATE_MARKER_INTERVAL` seconds (default 60) and shows the last known marker in between; a marker that has not changed makes no Herdr call at all.

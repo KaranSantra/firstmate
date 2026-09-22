@@ -18,11 +18,12 @@
 # on stderr. Exit 0 with the label, or 1 when the task has no readable record or
 # records no harness.
 #
-# marker prints the display marker for one pipeline state, for example "◆cx"
-# for review, and an empty line for a state this release does not mark - never a
+# marker prints the display marker for one pipeline state, for example "rvx"
+# for review, and an empty line for a state with no marker - never a
 # placeholder. bin/fm-state-marker.sh is its caller and owns which state keys
-# exist and when the marker is shown, cleared, and refreshed. Defaults ship
-# below, so a marker renders before the lookup file exists.
+# exist and when the marker is shown, cleared, and refreshed. The review
+# default ships below, so it renders before the lookup file exists; every other
+# state is marked only once the lookup gives it a glyph.
 #
 # marker is deliberately STRICTER than label about a broken lookup: an
 # unparseable or invalid file makes it print nothing and exit 1, saying why,
@@ -72,7 +73,7 @@
 #   [effort.aliases]             <effort word> = "<short alias>"
 #   [states.glyphs]              <pipeline state> = "<marker>"
 # A recorded model name claimed by more than one [models] entry is an error.
-# A marker must start with a symbol or emoji and cannot be longer than
+# A marker is any non-blank text, letters allowed, no longer than
 # GLYPH_MAX_CHARS below, because the sidebar row is horizontally tight. A state
 # name this release does not report is a warning, never a failure, so the lookup
 # survives a pipeline that renames or adds a step.
@@ -109,35 +110,31 @@ model_labels_py() {
 import os
 import re
 import sys
-import unicodedata
 
 BARE = re.compile(r"[A-Za-z0-9_-]+")
 SCALAR = re.compile(r"[+-]?[0-9]+|true|false")
 CATALOG_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
 CATALOG_ITEM = re.compile(r"^-\s+`([^`]+)`\s*$")
 
-# Display-only markers naming what currently holds a worker's lane, keyed by
-# the pipeline step the run reports (bin/fm-crew-state.sh names it) plus the two
-# keys that are not steps: fix for an auto-fix round and decision for a lane
-# parked at a gate. Shipped so the marker works with no lookup file at all; any
-# entry is overridden by [states.glyphs] in the lookup.
-#
-# Each marker is a symbol plus at most two characters, because the sidebar row
-# is horizontally tight - GLYPH_MAX_CHARS below enforces that. The symbols come
-# from the Geometric Shapes block already proven in this sidebar by the worker
-# mark's own token.
+# The state keys a marker can be configured for: the pipeline steps the run
+# reports (bin/fm-crew-state.sh names them) plus the two keys that are not
+# steps, fix for an auto-fix round and decision for a lane parked at a gate.
+STATE_KEYS = (
+    "intent", "review", "test", "lint", "document", "push", "pr", "ci",
+    "fix", "decision",
+)
+
+# Display-only markers shipped so the marker works with no lookup file at all.
+# Only the review is marked by default - "rv" for review, "x" for the Codex
+# reviewer - because which lane is with the reviewer is the one thing the
+# sidebar cannot otherwise show; every other state stays bare until
+# [states.glyphs] in the lookup gives it a glyph, and that table also
+# overrides this entry.
 DEFAULT_STATE_GLYPHS = {
-    "review": "\u25c6cx",
-    "fix": "\u25c8fx",
-    "test": "\u25c9ts",
-    "lint": "\u25c9ln",
-    "document": "\u25cedc",
-    "push": "\u25b2ps",
-    "pr": "\u25b2pr",
-    "ci": "\u25ccci",
-    "intent": "\u25c7in",
-    "decision": "\u25cd?",
+    "review": "rvx",
 }
+# A marker is at most three characters, letters allowed, because the sidebar
+# row is horizontally tight.
 GLYPH_MAX_CHARS = 3
 
 
@@ -275,10 +272,6 @@ def nonempty_string(v):
     return isinstance(v, str) and v.strip() != ""
 
 
-def marker_prefix_is_symbol(v):
-    return bool(v) and unicodedata.category(v[0])[0] in ("P", "S")
-
-
 def validate(doc):
     errors, warnings = [], []
     for key in doc:
@@ -359,12 +352,10 @@ def validate(doc):
                 continue
             if len(glyph) > GLYPH_MAX_CHARS:
                 errors.append(
-                    "%s is %d characters; a marker is a symbol plus at most two characters (%d max) because the sidebar row is tight"
+                    "%s is %d characters; a marker is at most %d characters because the sidebar row is tight"
                     % (where, len(glyph), GLYPH_MAX_CHARS)
                 )
-            if not marker_prefix_is_symbol(glyph):
-                errors.append("%s must begin with a symbol or emoji" % where)
-            if name not in DEFAULT_STATE_GLYPHS:
+            if name not in STATE_KEYS:
                 warnings.append("%s names no pipeline state this release reports" % where)
     return errors, warnings
 
