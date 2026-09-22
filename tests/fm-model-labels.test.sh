@@ -70,9 +70,29 @@ pass "label: also_recorded_as match"
 
 fm_write_meta "$STATE_DIR/unknown.meta" harness=codex model=gpt-9-example effort=ultra
 out=$(label unknown) || fail "unknown model: label exited non-zero"
-assert_equals 'codex · gpt-9-example · ultra' "$out" "a model and effort word with no alias print their raw names"
+assert_equals 'codex · gpt-9-example · ultra' "$out" "an unprefixed model and effort word with no alias print their recorded names"
 assert_equals '' "$(cat "$ERR")" "a missing alias is not a warning"
-pass "label: missing aliases fall back to raw names"
+pass "label: missing aliases fall back to recorded names"
+
+# The label already names the runtime, so an unaliased model never repeats it:
+# the reported symptom was "claude · claude-opus-5-5 · high".
+fm_write_meta "$STATE_DIR/harness-prefix.meta" harness=claude model=claude-opus-5-5 effort=high
+out=$(label harness-prefix) || fail "harness prefix: label exited non-zero"
+assert_equals 'claude · opus-5-5 · hi' "$out" "a leading harness prefix is dropped from an unaliased model"
+fm_write_meta "$STATE_DIR/provider-path.meta" harness=pi model=anthropic/claude-opus-5-5 effort=high
+out=$(label provider-path) || fail "provider path: label exited non-zero"
+assert_equals 'pi · claude-opus-5-5 · hi' "$out" "a leading provider path is dropped, keeping a name that is not the runtime"
+fm_write_meta "$STATE_DIR/provider-and-harness.meta" harness=claude model=anthropic/claude-opus-5-5
+out=$(label provider-and-harness) || fail "provider and harness: label exited non-zero"
+assert_equals 'claude · opus-5-5' "$out" "a provider path and a harness prefix are both dropped"
+fm_write_meta "$STATE_DIR/bare-harness.meta" harness=codex model=codex
+out=$(label bare-harness) || fail "bare harness model: label exited non-zero"
+assert_equals 'codex · codex' "$out" "a model named only for its harness is kept whole"
+fm_write_meta "$STATE_DIR/aliased-prefix.meta" harness=claude model=claude-opus-5 effort=high
+out=$(label aliased-prefix) || fail "aliased prefixed model: label exited non-zero"
+assert_equals 'claude · opus5 · hi' "$out" "an alias wins over the prefix-stripped name"
+assert_equals '' "$(cat "$ERR")" "prefix stripping is not a warning"
+pass "label: an unaliased model never repeats its provider or harness"
 
 fm_write_meta "$STATE_DIR/no-effort.meta" harness=codex model=gpt-5.6-terra
 out=$(label no-effort) || fail "missing effort: label exited non-zero"
@@ -83,11 +103,11 @@ assert_equals 'claude' "$out" "default and - markers omit their segments"
 pass "label: missing effort omits the segment"
 
 out=$(label exact FM_MODEL_LABELS_FILE="$TMP_ROOT/absent.toml") || fail "absent lookup: label exited non-zero"
-assert_equals 'claude · claude-opus-5 · high' "$out" "an absent lookup file falls back to raw names"
+assert_equals 'claude · opus-5 · high' "$out" "an absent lookup file falls back to unaliased names"
 assert_equals '' "$(cat "$ERR")" "an absent lookup file is silent"
 printf '[models."claude-opus-5"]\nalias = opus5\n' > "$TMP_ROOT/broken.toml"
 out=$(label exact FM_MODEL_LABELS_FILE="$TMP_ROOT/broken.toml") || fail "invalid lookup: label exited non-zero"
-assert_equals 'claude · claude-opus-5 · high' "$out" "an invalid lookup file falls back to raw names"
+assert_equals 'claude · opus-5 · high' "$out" "an invalid lookup file falls back to unaliased names"
 assert_equals 1 "$(grep -c '^warning:' "$ERR")" "an invalid lookup file warns exactly once"
 pass "label: absent or invalid lookup never fails"
 

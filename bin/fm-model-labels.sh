@@ -11,10 +11,14 @@
 # from state/<task-id>.meta's harness=, model=, and effort= fields, for example
 # "claude · opus5 · hi". A model matches the lookup by its exact
 # [models."<recorded model>"] key or by any value in that entry's
-# also_recorded_as list. A model or effort word with no alias prints its raw
-# recorded name - never an error. A model or effort segment whose field is
+# also_recorded_as list. A model with no alias prints its recorded name with
+# any leading provider path ("anthropic/") and any leading "<harness>-" prefix
+# removed, so the label never repeats the runtime ("claude · opus-5-5", not
+# "claude · claude-opus-5-5"); the recorded name is kept whole if nothing would
+# remain. An effort word with no alias prints its raw name. Neither is ever an
+# error. A model or effort segment whose field is
 # absent, empty, "-", or "default" is omitted. A missing lookup file silently
-# falls back to raw names; an invalid one also falls back and adds one warning
+# falls back to unaliased names; an invalid one also falls back and adds one warning
 # on stderr. Exit 0 with the label, or 1 when the task has no readable record or
 # records no harness.
 #
@@ -54,7 +58,7 @@
 # <config>/model-labels.toml, where <config> is FM_CONFIG_OVERRIDE or
 # $FM_HOME/config. Task records come from FM_STATE_OVERRIDE or $FM_HOME/state,
 # and the catalog from FM_DATA_OVERRIDE or $FM_HOME/data. python3 reads the
-# lookup; without python3, label falls back to raw names with one warning and
+# lookup; without python3, label falls back to unaliased names with one warning and
 # check fails.
 #
 # Accepted lookup syntax is this TOML subset, parsed without a TOML library so
@@ -397,7 +401,7 @@ def model_alias(doc, model):
     for entry in models.values():
         if isinstance(entry, dict) and model in (entry.get("also_recorded_as") or []):
             return entry["alias"]
-    return model
+    return ""
 
 
 def check(path, catalog):
@@ -414,7 +418,7 @@ def check(path, catalog):
     for e in errors:
         print("error: %s" % e)
     if errors:
-        print("invalid: %s has %d error(s); labels fall back to raw names until it is fixed" % (path, len(errors)))
+        print("invalid: %s has %d error(s); labels fall back to unaliased names until it is fixed" % (path, len(errors)))
         return 1
     if os.path.isfile(catalog):
         models = catalog_models(catalog)
@@ -424,7 +428,7 @@ def check(path, catalog):
             known = recorded_names(doc)
             for model in models:
                 if model not in known:
-                    print("info: catalog model %s has no alias and shows its raw name" % model)
+                    print("info: catalog model %s has no alias and shows its unaliased name" % model)
     print("ok: %s is valid (%d warning(s))" % (path, len(warnings)))
     return 0
 
@@ -476,8 +480,9 @@ def main():
             errors = ["unreadable"]
         if errors:
             doc = {}
-            sys.stderr.write("warning: %s is invalid, so labels use raw names; run bin/fm-model-labels.sh check\n" % path)
+            sys.stderr.write("warning: %s is invalid, so labels use unaliased names; run bin/fm-model-labels.sh check\n" % path)
     aliases = doc.get("effort", {}).get("aliases", {})
+    # An empty model line means no alias matched; cmd_label names the model.
     print(model_alias(doc, model) if model else "")
     print(aliases.get(effort, effort) if effort else "")
     return 0
@@ -497,6 +502,18 @@ label_field() {
   printf '%s' "$value"
 }
 
+# unaliased_model <model> <harness>: the display name for a model with no
+# alias. It drops a leading provider path and a leading "<harness>-" prefix,
+# because the label already names the runtime, and keeps the recorded name
+# whole when nothing would remain.
+unaliased_model() {
+  local name=${1##*/}
+  case "$name" in
+    "$2"-?*) name=${name#"$2"-} ;;
+  esac
+  printf '%s' "${name:-$1}"
+}
+
 cmd_label() {
   local id=${1:-} meta harness model effort out model_alias effort_alias label
   case "$id" in
@@ -508,15 +525,16 @@ cmd_label() {
   [ -n "$harness" ] || die "task $id records no harness"
   model=$(label_field "$meta" model)
   effort=$(label_field "$meta" effort)
-  model_alias=$model
+  model_alias=
   effort_alias=$effort
   if ! command -v python3 >/dev/null 2>&1; then
-    [ ! -e "$LABELS_FILE" ] || printf 'warning: python3 is not installed, so labels use raw names\n' >&2
+    [ ! -e "$LABELS_FILE" ] || printf 'warning: python3 is not installed, so labels use unaliased names\n' >&2
   elif out=$(model_labels_py aliases "$LABELS_FILE" "$model" "$effort"); then
     { IFS= read -r model_alias; IFS= read -r effort_alias; } <<<"$out"
   else
-    printf 'warning: %s could not be read, so labels use raw names\n' "$LABELS_FILE" >&2
+    printf 'warning: %s could not be read, so labels use unaliased names\n' "$LABELS_FILE" >&2
   fi
+  [ -n "$model_alias" ] || [ -z "$model" ] || model_alias=$(unaliased_model "$model" "$harness")
   label=$harness
   [ -z "$model_alias" ] || label="$label$SEP$model_alias"
   [ -z "$effort_alias" ] || label="$label$SEP$effort_alias"
