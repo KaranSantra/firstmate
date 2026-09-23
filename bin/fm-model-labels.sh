@@ -7,9 +7,11 @@
 #   fm-model-labels.sh marker <state key>
 #   fm-model-labels.sh check
 #
-# label prints "<harness> · <model alias> · <effort alias>" for one task, read
+# label prints "<provider> · <model alias> · <effort alias>" for one task, read
 # from state/<task-id>.meta's harness=, model=, and effort= fields, for example
-# "claude · opus5 · hi". A model matches the lookup by its exact
+# "claude · opus5 · hi". A provider defaults to the recorded harness and may
+# have a display alias under [providers.aliases]. A model matches the lookup by
+# its exact
 # [models."<recorded model>"] key or by any value in that entry's
 # also_recorded_as list. A model with no alias prints its recorded name with
 # any leading provider path ("anthropic/") and any leading "<harness>-" prefix
@@ -71,6 +73,7 @@
 #
 # Schema (schema = 1):
 #   [meta]                       schema (integer), updated (string)
+#   [providers.aliases]          <recorded harness> = "<provider label>"
 #   [models."<recorded model>"]  alias (string, required), also_recorded_as
 #                                (string array), provider, verified, note
 #                                (strings)
@@ -107,8 +110,8 @@ die() {
 }
 
 # model_labels_py <mode> <file> ...: the one lookup parser and schema validator.
-# mode=aliases <model> <effort> prints the model alias line then the effort
-# alias line; mode=check <catalog> prints the validation report.
+# mode=aliases <harness> <model> <effort> prints the provider, model, and
+# effort alias lines; mode=check <catalog> prints the validation report.
 model_labels_py() {
   python3 - "$@" <<'PY'
 import os
@@ -279,7 +282,7 @@ def nonempty_string(v):
 def validate(doc):
     errors, warnings = [], []
     for key in doc:
-        if key not in ("meta", "models", "effort", "states"):
+        if key not in ("meta", "providers", "models", "effort", "states"):
             warnings.append("unknown top-level key %s" % key)
     meta = doc.get("meta", {})
     if not isinstance(meta, dict):
@@ -324,6 +327,20 @@ def validate(doc):
             owner = claimed.setdefault(recorded, name)
             if owner != name:
                 errors.append('recorded name "%s" is claimed by both models."%s" and %s' % (recorded, owner, where))
+    providers = doc.get("providers", {})
+    if not isinstance(providers, dict):
+        errors.append("providers must be a table")
+        providers = {}
+    for key, value in providers.items():
+        if key != "aliases":
+            warnings.append("unknown key providers.%s" % key)
+            continue
+        if not isinstance(value, dict):
+            errors.append("providers.aliases must be a table")
+            continue
+        for harness, alias in value.items():
+            if not nonempty_string(alias):
+                errors.append("providers.aliases.%s must be a non-empty string" % harness)
     effort = doc.get("effort", {})
     if not isinstance(effort, dict):
         errors.append("effort must be a table")
@@ -391,6 +408,11 @@ def catalog_models(path):
     except (OSError, UnicodeDecodeError):
         return None
     return found
+
+
+def provider_alias(doc, harness):
+    aliases = doc.get("providers", {}).get("aliases", {})
+    return aliases.get(harness, harness)
 
 
 def model_alias(doc, model):
@@ -471,7 +493,7 @@ def main():
         return check(path, sys.argv[3])
     if mode == "marker":
         return marker(path, sys.argv[3])
-    model, effort = sys.argv[3], sys.argv[4]
+    harness, model, effort = sys.argv[3], sys.argv[4], sys.argv[5]
     doc = {}
     if os.path.isfile(path):
         try:
@@ -482,6 +504,7 @@ def main():
             doc = {}
             sys.stderr.write("warning: %s is invalid, so labels use unaliased names; run bin/fm-model-labels.sh check\n" % path)
     aliases = doc.get("effort", {}).get("aliases", {})
+    print(provider_alias(doc, harness))
     # An empty model line means no alias matched; cmd_label names the model.
     print(model_alias(doc, model) if model else "")
     print(aliases.get(effort, effort) if effort else "")
@@ -515,7 +538,7 @@ unaliased_model() {
 }
 
 cmd_label() {
-  local id=${1:-} meta harness model effort out model_alias effort_alias label
+  local id=${1:-} meta harness model effort out provider_alias model_alias effort_alias label
   case "$id" in
     '' | */* | .*) die "label needs a task id" 2 ;;
   esac
@@ -525,17 +548,22 @@ cmd_label() {
   [ -n "$harness" ] || die "task $id records no harness"
   model=$(label_field "$meta" model)
   effort=$(label_field "$meta" effort)
+  provider_alias=$harness
   model_alias=
   effort_alias=$effort
   if ! command -v python3 >/dev/null 2>&1; then
     [ ! -e "$LABELS_FILE" ] || printf 'warning: python3 is not installed, so labels use unaliased names\n' >&2
-  elif out=$(model_labels_py aliases "$LABELS_FILE" "$model" "$effort"); then
-    { IFS= read -r model_alias; IFS= read -r effort_alias; } <<<"$out"
+  elif out=$(model_labels_py aliases "$LABELS_FILE" "$harness" "$model" "$effort"); then
+    { IFS= read -r provider_alias; IFS= read -r model_alias; IFS= read -r effort_alias; } <<<"$out"
   else
     printf 'warning: %s could not be read, so labels use unaliased names\n' "$LABELS_FILE" >&2
   fi
-  [ -n "$model_alias" ] || [ -z "$model" ] || model_alias=$(unaliased_model "$model" "$harness")
-  label=$harness
+  # Drop a leading segment that only repeats the provider already shown. With a
+  # provider alias the shown segment is that alias, not the raw harness, so an
+  # aliased row like "xAI · grok-4.6" keeps the model whole while an unaliased
+  # "claude · claude-opus-5-5" still collapses to "claude · opus-5-5".
+  [ -n "$model_alias" ] || [ -z "$model" ] || model_alias=$(unaliased_model "$model" "$provider_alias")
+  label=$provider_alias
   [ -z "$model_alias" ] || label="$label$SEP$model_alias"
   [ -z "$effort_alias" ] || label="$label$SEP$effort_alias"
   printf '%s\n' "$label"

@@ -4,7 +4,9 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
+//   { stats:[{n,label}],
+//     callSummary:[{title,meaning}],
+//     underway:[{worker,area,now,what,next,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -108,8 +110,48 @@ const rowsOf = (container) =>
       };
     });
 
+// Deep helpers for the table-shaped sections: cells and badges nest below the
+// row, so a direct-children scan is not enough.
+const firstByClass = (root, cls) => {
+  let found = null;
+  const walk = (n) => {
+    for (const c of n.children) {
+      if (!found && c.className.split(/\s+/).includes(cls)) found = c;
+      walk(c);
+    }
+  };
+  walk(root);
+  return found;
+};
+const badgesDeep = (root) => {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.children) {
+      if (c.className.includes("fm-badge")) out.push({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent });
+      walk(c);
+    }
+  };
+  walk(root);
+  return out;
+};
+
 const uw = byId.get("bb-underway") || new Node("div");
-const underway = rowsOf(uw);
+const underway = uw.querySelectorAll(".bb-roster__row").map((tr) => ({
+  worker: firstByClass(tr, "bb-roster__name")?.textContent ?? "",
+  area: firstByClass(tr, "bb-roster__area")?.textContent ?? "",
+  now: badgesDeep(firstByClass(tr, "bb-roster__now") || tr).map((b) => b.text).join("") ,
+  what: firstByClass(tr, "bb-roster__what")?.textContent ?? "",
+  next: firstByClass(tr, "bb-roster__next")?.textContent ?? "",
+  badges: badgesDeep(tr),
+}));
+
+const callSummary = (byId.get("bb-call-summary") || new Node("div"))
+  .querySelectorAll(".bb-summary__row")
+  .map((tr) => ({
+    title: firstByClass(tr, "bb-summary__title")?.textContent ?? "",
+    meaning: firstByClass(tr, "bb-summary__mean")?.textContent ?? "",
+  }))
+  .filter((r) => r.title || r.meaning);
 
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
@@ -123,4 +165,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, callSummary, underway, charted, empty, more, error: errorText }) + "\n");
