@@ -165,27 +165,43 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
-test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
+test_the_roster_names_the_worker_and_keeps_state_what_and_next_in_columns() {
   local home out
-  home=$(make_home underway-name)
+  home=$(make_home roster-columns)
   out=$(render_board "$home" '[
     {"id":"fm-board-name-r1","repo":"firstmate","name":"Show task names on the board",
-     "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
+     "state":"working","kind":"ship","doing":"reviewing round 2",
+     "next":"Review the open PR when it turns merge-ready"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 1
       and (.underway[0]
-        | .title == "Show task names on the board"
-          and (.sub | test("no-mistakes: review round 2"))
-          and (.sub | test("ship")) and (.sub | test("firstmate"))
-          and [.badges[] | .text] == ["working"])
-  ' >/dev/null || fail "an underway row did not lead with the task name: $out"
-  pass "an underway row leads with the task name and still reports its run status"
+        | .worker == "Show task names on the board"
+          and .area == "firstmate"
+          and .now == "working"
+          and .what == "reviewing round 2"
+          and .next == "Review the open PR when it turns merge-ready"
+          and ([.badges[] | .text] == ["working"]))
+  ' >/dev/null || fail "the roster did not split the worker, state, what, and next into columns: $out"
+  pass "the roster names the worker and keeps Now/What/Next in separate columns"
 }
 
-test_an_underway_identifier_label_is_not_replaced_by_run_status() {
+test_a_roster_row_without_a_next_step_reads_nothing_now() {
   local home out
-  home=$(make_home underway-identifier)
+  home=$(make_home roster-next-default)
+  out=$(render_board "$home" '[
+    {"id":"quiet-task","repo":"sample","name":"Quiet worker",
+     "state":"working","kind":"ship","doing":"still building"}
+  ]' '[]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 1 and (.underway[0].next == "nothing now")
+  ' >/dev/null || fail "a roster row with no next step did not read \"nothing now\": $out"
+  pass "a roster row with no personal next step reads \"nothing now\""
+}
+
+test_an_identifier_labelled_roster_row_is_not_replaced_by_run_status() {
+  local home out
+  home=$(make_home roster-identifier)
   out=$(render_board "$home" '[
     {"id":"mate/child-1","repo":null,"name":"mate/child-1",
      "state":"working","kind":"secondmate","doing":"fixing the failing check"}
@@ -193,11 +209,44 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   printf '%s' "$out" | jq -e '
     (.underway | length) == 1
       and (.underway[0]
-        | .title == "mate/child-1"
-          and (.sub | startswith("fixing the failing check · "))
-          and (.title != "fixing the failing check"))
-  ' >/dev/null || fail "an identifier-labelled underway row rendered as status-only: $out"
-  pass "an underway identifier label is not replaced by run status"
+        | .worker == "mate/child-1"
+          and .area == "mate/child-1"
+          and .what == "fixing the failing check"
+          and (.worker != "fixing the failing check"))
+  ' >/dev/null || fail "an identifier-labelled roster row rendered as status-only: $out"
+  pass "an identifier-labelled roster row is not replaced by run status"
+}
+
+test_the_needs_you_now_summary_lists_every_personal_call() {
+  local home out data
+  home=$(make_home call-summary)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"summary-home", generated:"2026-09-22T00:00Z",
+    prs_live:false,
+    captains_call:[
+      {"key":"pick-table","type":"decision","repo":"firstmate","title":"Pick the status table",
+       "decide":"Choosing it starts the build.",
+       "options":[{"value":"b","label":"Design B"}]},
+      {"key":"merge.sidebar","type":"merge","repo":"firstmate","title":"Merge the sidebar PR",
+       "detail":"Checks are green.","risk":"low",
+       "options":[{"value":"merge","label":"Merge now"}]}
+    ],
+    underway:[], landed:[], charted:[], charted_more:0}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$BOARD" build "$data" >/dev/null || fail "the summary board did not build"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
+    || fail "the built summary board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    (.callSummary | length) == 2
+      and (.callSummary[0] | .title == "Pick the status table"
+        and .meaning == "Choosing it starts the build.")
+      and (.callSummary[1] | .title == "Merge the sidebar PR"
+        and .meaning == "Checks are green.")
+  ' >/dev/null || fail "the needs-you-now summary did not list each personal call with its meaning: $out"
+  pass "the needs-you-now summary lists every personal call with a one-line meaning"
 }
 
 test_charted_next_reads_newest_filed_first() {
@@ -228,8 +277,10 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
-test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
-test_an_underway_identifier_label_is_not_replaced_by_run_status
+test_the_roster_names_the_worker_and_keeps_state_what_and_next_in_columns
+test_a_roster_row_without_a_next_step_reads_nothing_now
+test_an_identifier_labelled_roster_row_is_not_replaced_by_run_status
+test_the_needs_you_now_summary_lists_every_personal_call
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
