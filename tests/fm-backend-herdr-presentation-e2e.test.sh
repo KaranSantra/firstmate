@@ -1010,7 +1010,16 @@ fi
 [ "$(count_spaces_holding "$REGROUP_OLD_CHECKOUT")" = 0 ] \
   || fail "a space still holds the regroup fixture's checkout after its group closed"
 [ -d "$REGROUP_OLD_WT" ] || fail "closing the project group deleted the worker's worktree"
-assert_focus_is "$CAPTAIN_FOCUS" "closing the regroup fixture's project group"
+if [ "$FLOOR_VERDICT" = 0 ]; then
+  assert_focus_is "$CAPTAIN_FOCUS" "closing the regroup fixture's project group"
+else
+  # Below the presentation floor a raw close of an unfocused workspace moves
+  # focus (fixed in herdr 0.8.0). The close is fixture setup, not the behavior
+  # under test, so restore the captain's focus before the re-dispatch that is.
+  lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+    || fail "could not restore the captain's focus after closing the regroup fixture's project group on below-floor herdr $FLOOR_VERSION"
+  assert_focus_is "$CAPTAIN_FOCUS" "restoring focus after closing the regroup fixture's project group on below-floor herdr $FLOOR_VERSION"
+fi
 REGROUP_START=$(log_line_count)
 spawn_task "$REGROUP_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/regroup-again.out" 2> "$TMP_ROOT/regroup-again.err" \
   || fail "regroup same-identity re-dispatch failed: $(cat "$TMP_ROOT/regroup-again.err")"
