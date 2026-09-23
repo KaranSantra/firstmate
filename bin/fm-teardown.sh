@@ -3532,7 +3532,12 @@ else
 fi
 if [ -d "$STATE" ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-state-marker.sh" retire "$ID" >/dev/null 2>&1 || exit 1
+    "$SCRIPT_DIR/fm-state-marker.sh" retire "$ID" >/dev/null 2>&1 || {
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID's endpoint, local copy, and task record are cleaned up, but its sidebar marker record could not be retired" >&2
+    exit 1
+  }
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
