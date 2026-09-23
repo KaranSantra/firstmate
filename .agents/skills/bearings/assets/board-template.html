@@ -258,6 +258,38 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
+/* ---- Needs-you-now action summary (Captain's Call overview table) ---- */
+.bb-summary { width: 100%; border-collapse: collapse; }
+.bb-summary th {
+  text-align: left; font-family: var(--font-mono); font-size: var(--fs-2xs);
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); font-weight: 700;
+  padding: 8px 12px; border-bottom: 1.5px solid var(--rust-500);
+}
+.bb-summary td { padding: 9px 12px; border-top: 1px solid var(--border-soft); vertical-align: top; line-height: 1.35; }
+.bb-summary tbody tr:first-child td { border-top: none; }
+.bb-summary__title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); white-space: nowrap; }
+.bb-summary__mean { font-size: var(--fs-sm); color: var(--text-muted); }
+.bb-callsummary:not(:empty) {
+  background: var(--rust-050); border: 1.5px solid var(--rust-500);
+  border-radius: var(--radius-md); overflow: hidden;
+}
+
+/* ---- Underway roster table (Worker / Now / What / Next) ---- */
+.bb-roster { width: 100%; border-collapse: collapse; }
+.bb-roster th {
+  text-align: left; font-family: var(--font-mono); font-size: var(--fs-2xs);
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); font-weight: 700;
+  padding: 11px 16px; border-bottom: 1.5px solid var(--border-default); vertical-align: bottom;
+}
+.bb-roster td { padding: 12px 16px; border-top: 1px solid var(--border-soft); vertical-align: top; color: var(--text-body); line-height: 1.4; }
+.bb-roster tbody tr:first-child td { border-top: none; }
+.bb-roster__worker { min-width: 0; }
+.bb-roster__name { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); }
+.bb-roster__area { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); margin-top: 1px; }
+.bb-roster__now { white-space: nowrap; }
+.bb-roster__what { font-size: var(--fs-sm); }
+.bb-roster__next { font-size: var(--fs-sm); color: var(--text-muted); }
+
 /* ---- Charted Next dispatch picker ---- */
 /* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
    share one text left edge */
@@ -305,6 +337,9 @@ a { color: inherit; text-decoration: none; }
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
+    <!-- Needs-you-now action summary: a scannable table of every personal call,
+         above the one-at-a-time answer deck below it. -->
+    <div class="bb-callsummary" id="bb-call-summary"></div>
     <div class="bb-callwrap">
       <div class="bb-call" id="bb-call"></div>
       <!-- nav sits under the stack so the active card's top edge aligns with
@@ -343,27 +378,25 @@ a { color: inherit; text-decoration: none; }
   </section>
   </div>
 
-  <div class="bb-cols">
-    <section class="bb-section">
-      <div class="bb-section__head">
-        <span class="fm-sign fm-sign--eyebrow">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
-          Underway
-        </span>
-      </div>
-      <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
-    </section>
+  <section class="bb-section">
+    <div class="bb-section__head">
+      <span class="fm-sign fm-sign--eyebrow">
+        <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
+        Underway
+      </span>
+    </div>
+    <div class="fm-card"><div id="bb-underway"></div></div>
+  </section>
 
-    <section class="bb-section">
-      <div class="bb-section__head">
-        <span class="fm-sign fm-sign--eyebrow">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
-          Recently Landed
-        </span>
-      </div>
-      <div class="fm-card"><div class="bb-rows" id="bb-landed"></div></div>
-    </section>
-  </div>
+  <section class="bb-section">
+    <div class="bb-section__head">
+      <span class="fm-sign fm-sign--eyebrow">
+        <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
+        Recently Landed
+      </span>
+    </div>
+    <div class="fm-card"><div class="bb-rows" id="bb-landed"></div></div>
+  </section>
 
   <footer class="bb-foot">
     <span class="bb-meta-mono" id="bb-provenance">-</span>
@@ -474,6 +507,32 @@ __FM_BEARINGS_BOARD_DATA__
   });
   document.getElementById("bb-call-sub").textContent =
     callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+
+  /* Needs-you-now summary: a scannable table of every personal call, so the
+     whole set reads at a glance above the deck that answers them one at a time.
+     One meaning line per call, derived from the same fields the card shows. */
+  function callMeaning(item) {
+    if (item.type === "merge") return item.detail || "Checks are green and it is ready to merge.";
+    return item.decide || item.about || item.detail || "Needs your decision.";
+  }
+  var summary = document.getElementById("bb-call-summary");
+  if (callTotal) {
+    var sTable = el("table", "bb-summary");
+    var sHead = el("thead");
+    var sHeadRow = el("tr");
+    ["Needs you now", "What it means"].forEach(function (h) { sHeadRow.appendChild(el("th", null, h)); });
+    sHead.appendChild(sHeadRow);
+    sTable.appendChild(sHead);
+    var sBody = el("tbody");
+    data.captains_call.forEach(function (item) {
+      var tr = el("tr", "bb-summary__row");
+      tr.appendChild(el("td", "bb-summary__title", item.title));
+      tr.appendChild(el("td", "bb-summary__mean", callMeaning(item)));
+      sBody.appendChild(tr);
+    });
+    sTable.appendChild(sBody);
+    summary.appendChild(sTable);
+  }
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
@@ -621,23 +680,42 @@ __FM_BEARINGS_BOARD_DATA__
     stackNav.hidden = true;
   }
 
-  /* Underway */
+  /* Underway roster table: one row per live worker across four standing
+     columns - who, current state, what happened and what it means, and the one
+     next step or personal need. */
   var uw = document.getElementById("bb-underway");
-  if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
-  data.underway.forEach(function (t) {
-    var row = el("div", "bb-row");
-    row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
-    var main = el("div", "bb-row__main");
-    /* the snapshot's durable name-or-id label leads the row so a scan says
-       WHICH task this is; the run status keeps its place on the second line */
-    main.appendChild(el("div", "bb-row__title", t.name));
-    /* captain-facing rows name the repo; the internal task id shows only when
-       no repo is known */
-    main.appendChild(el("div", "bb-row__sub",
-      t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
-    row.appendChild(main);
-    uw.appendChild(row);
-  });
+  if (!data.underway.length) {
+    uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
+  } else {
+    var roster = el("table", "bb-roster");
+    var rHead = el("thead");
+    var rHeadRow = el("tr");
+    ["Worker / area", "Now", "What happened and what it means", "Next, or needed from you"]
+      .forEach(function (h) { rHeadRow.appendChild(el("th", null, h)); });
+    rHead.appendChild(rHeadRow);
+    roster.appendChild(rHead);
+    var rBody = el("tbody");
+    data.underway.forEach(function (t) {
+      var tr = el("tr", "bb-roster__row");
+      var worker = el("td", "bb-roster__worker");
+      /* the snapshot's durable name-or-id label leads the row so a scan says
+         WHICH task this is */
+      worker.appendChild(el("div", "bb-roster__name", t.name));
+      /* captain-facing rows name the repo; the internal task id shows only when
+         no repo is known */
+      worker.appendChild(el("div", "bb-roster__area", t.repo || t.id));
+      tr.appendChild(worker);
+      var now = el("td", "bb-roster__now");
+      now.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
+      tr.appendChild(now);
+      tr.appendChild(el("td", "bb-roster__what", t.doing));
+      var nextText = (typeof t.next === "string" && t.next.trim()) ? t.next : "nothing now";
+      tr.appendChild(el("td", "bb-roster__next", nextText));
+      rBody.appendChild(tr);
+    });
+    roster.appendChild(rBody);
+    uw.appendChild(roster);
+  }
 
   /* Landed */
   var ld = document.getElementById("bb-landed");

@@ -188,6 +188,23 @@ extract_payload() {  # <board-path>
     | sed '1d;$d'
 }
 
+test_build_carries_an_underway_next_field_through_to_the_page() {
+  local home data board
+  home=$(make_home underway-next)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","name":"Sample worker",
+    "state":"working","kind":"ship","doing":"implementing",
+    "next":"Review the open PR when it turns merge-ready"}]' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid underway next field was refused"
+  extract_payload "$board" | jq -e '
+    .underway[0].next == "Review the open PR when it turns merge-ready"
+  ' >/dev/null || fail "the built board dropped the underway next field"
+  pass "build carries a valid underway next field through to the board"
+}
+
 test_path_is_stable_and_home_scoped() {
   local home
   home=$(make_home path)
@@ -269,6 +286,13 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
     "kind":"ship","doing":"implementing"}]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
+
+  write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","name":"Sample worker",
+    "state":"working","kind":"ship","doing":"implementing","next":42}]' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an underway row with a non-string next field was accepted"
 
   for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29"; do
     write_valid_payload "$data"
@@ -788,6 +812,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_build_carries_an_underway_next_field_through_to_the_page
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
