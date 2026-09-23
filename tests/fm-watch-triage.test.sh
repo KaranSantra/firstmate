@@ -4925,6 +4925,95 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_actionable_signal_refreshes_the_sidebar_marker() {
+  local dir state fakebin out marker_log pid i
+  dir=$(make_case actionable-marker-refresh); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; marker_log="$dir/herdr.log"
+  mkdir -p "$dir/config"
+  cat > "$dir/config/model-labels.toml" <<'TOML'
+[states.glyphs]
+review = "◆rv"
+decision = "◇dc"
+TOML
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"compatible":true}}\n' ;;
+  "pane report-metadata") printf '%s\n' "$*" >> "$FM_HERDR_LOG" ;;
+  "pane read") printf 'render %s\n' "$$" ;;
+  "pane get") printf '{"result":{"agent_state":"working"}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$state/review.meta" window=default:w1:p1 backend=herdr kind=ship \
+    herdr_session=default herdr_pane_id=w1:p1
+  printf '%s\t1\t◆rv\n' "$(date +%s)" > "$state/review.state-marker"
+  printf 'needs-decision: pick A or B\n' > "$state/review.status"
+  FM_HOME="$dir" FM_HERDR_LOG="$marker_log" \
+    FM_STATE_MARKER_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_MARKER_INTERVAL=0 \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting approval' \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface the actionable decision"; }
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -Fq -- '--token st=◇dc' "$marker_log" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -Fq -- '--token st=◇dc' "$marker_log" \
+    || fail "an actionable decision did not replace the stale review marker: $(cat "$marker_log" 2>/dev/null || true)"
+  pass "an actionable decision refreshes its sidebar marker before watcher exit"
+}
+
+test_marker_lookup_error_reaches_watcher_stderr_once() {
+  local dir state fakebin out err pid i first second
+  dir=$(make_case marker-lookup-error); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"
+  mkdir -p "$dir/config"
+  cat > "$dir/config/model-labels.toml" <<'TOML'
+[states.glyphs]
+review = "abcd"
+TOML
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"compatible":true}}\n' ;;
+  "pane read") printf 'render %s\n' "$$" ;;
+  "pane get") printf '{"result":{"agent_state":"working"}}\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$state/review.meta" window=default:w1:p1 backend=herdr kind=ship \
+    herdr_session=default herdr_pane_id=w1:p1
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_MARKER_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running: review)' \
+    FM_STATE_MARKER_INTERVAL=0 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >"$out" 2>"$err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -Fq 'state marker review: marker lookup failed' "$err"; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -Fq 'state marker review: marker lookup failed' "$err" \
+    || { reap "$pid"; fail "the marker lookup diagnostic never reached watcher stderr: $(cat "$err")"; }
+  wait_live "$pid" 10 || { reap "$pid"; fail "the marker lookup failure changed watcher triage"; }
+  first=$(grep -Fc 'state marker review: marker lookup failed' "$err")
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the watcher stopped before a second marker cycle"
+  fi
+  second=$(grep -Fc 'state marker review: marker lookup failed' "$err")
+  [ "$first" = "$second" ] \
+    || { reap "$pid"; fail "the watcher repeated an unchanged marker lookup diagnostic"; }
+  reap "$pid"
+  pass "marker lookup failures reach watcher stderr once without changing triage"
+}
+
 
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
@@ -5039,5 +5128,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_actionable_signal_refreshes_the_sidebar_marker
+test_marker_lookup_error_reaches_watcher_stderr_once
 test_herdr_lost_endpoint_is_surfaced_once_with_its_work
 test_herdr_lost_endpoint_detection_degrades_safely

@@ -1,20 +1,39 @@
 #!/usr/bin/env bash
-# fm-model-labels.sh - display-only labels naming a worker's runtime, model, and effort.
+# fm-model-labels.sh - display-only labels naming a worker's runtime, model, and
+# effort, and the markers naming what currently holds its lane.
 #
 # Usage:
 #   fm-model-labels.sh label <task-id>
+#   fm-model-labels.sh marker <state key>
 #   fm-model-labels.sh check
 #
 # label prints "<harness> · <model alias> · <effort alias>" for one task, read
 # from state/<task-id>.meta's harness=, model=, and effort= fields, for example
 # "claude · opus5 · hi". A model matches the lookup by its exact
 # [models."<recorded model>"] key or by any value in that entry's
-# also_recorded_as list. A model or effort word with no alias prints its raw
-# recorded name - never an error. A model or effort segment whose field is
+# also_recorded_as list. A model with no alias prints its recorded name with
+# any leading provider path ("anthropic/") and any leading "<harness>-" prefix
+# removed, so the label never repeats the runtime ("claude · opus-5-5", not
+# "claude · claude-opus-5-5"); the recorded name is kept whole if nothing would
+# remain. An effort word with no alias prints its raw name. Neither is ever an
+# error. A model or effort segment whose field is
 # absent, empty, "-", or "default" is omitted. A missing lookup file silently
-# falls back to raw names; an invalid one also falls back and adds one warning
+# falls back to unaliased names; an invalid one also falls back and adds one warning
 # on stderr. Exit 0 with the label, or 1 when the task has no readable record or
 # records no harness.
+#
+# marker prints the display marker for one pipeline state, for example "rvx"
+# for review, and an empty line for a state with no marker - never a
+# placeholder. bin/fm-state-marker.sh is its caller and owns which state keys
+# exist and when the marker is shown, cleared, and refreshed. The review
+# default ships below, so it renders before the lookup file exists; every other
+# state is marked only once the lookup gives it a glyph.
+#
+# marker is deliberately STRICTER than label about a broken lookup: an
+# unparseable or invalid file makes it print nothing and exit 1, saying why,
+# rather than falling back. The marker is the captain's own configuration
+# surface, so a typo must be visible instead of quietly showing him the wrong
+# symbol, whereas a label still wants to name the worker at all.
 #
 # check validates the lookup file. It prints one "warning:" line per unknown
 # key, one "error:" line per defect, and a closing summary. Unknown keys are
@@ -23,7 +42,8 @@
 # catalog model with no alias; that report never changes the result. Exit 0 for
 # a valid file (with or without warnings), 1 for an absent or invalid file.
 #
-# The lookup holds ONLY short display aliases for model names and effort words.
+# The lookup holds ONLY short display aliases: model names, effort words, and
+# pipeline-state markers.
 # The generated catalog (data/model-effort-catalog.md, rebuilt by
 # data/model-catalog/refresh.sh) is the single owner of which models exist and
 # which effort levels each accepts, so nothing here validates or restricts an
@@ -38,7 +58,7 @@
 # <config>/model-labels.toml, where <config> is FM_CONFIG_OVERRIDE or
 # $FM_HOME/config. Task records come from FM_STATE_OVERRIDE or $FM_HOME/state,
 # and the catalog from FM_DATA_OVERRIDE or $FM_HOME/data. python3 reads the
-# lookup; without python3, label falls back to raw names with one warning and
+# lookup; without python3, label falls back to unaliased names with one warning and
 # check fails.
 #
 # Accepted lookup syntax is this TOML subset, parsed without a TOML library so
@@ -55,7 +75,12 @@
 #                                (string array), provider, verified, note
 #                                (strings)
 #   [effort.aliases]             <effort word> = "<short alias>"
+#   [states.glyphs]              <pipeline state> = "<marker>"
 # A recorded model name claimed by more than one [models] entry is an error.
+# A marker is any non-blank text, letters allowed, no longer than
+# GLYPH_MAX_CHARS below, because the sidebar row is horizontally tight. A state
+# name this release does not report is a warning, never a failure, so the lookup
+# survives a pipeline that renames or adds a step.
 #
 # The catalog info report reads only table rows whose first cell is a single
 # `model` and list lines that are a single `model`.
@@ -94,6 +119,27 @@ BARE = re.compile(r"[A-Za-z0-9_-]+")
 SCALAR = re.compile(r"[+-]?[0-9]+|true|false")
 CATALOG_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
 CATALOG_ITEM = re.compile(r"^-\s+`([^`]+)`\s*$")
+
+# The state keys a marker can be configured for: the pipeline steps the run
+# reports (bin/fm-crew-state.sh names them) plus the two keys that are not
+# steps, fix for an auto-fix round and decision for a lane parked at a gate.
+STATE_KEYS = (
+    "intent", "review", "test", "lint", "document", "push", "pr", "ci",
+    "fix", "decision",
+)
+
+# Display-only markers shipped so the marker works with no lookup file at all.
+# Only the review is marked by default - "rv" for review, "x" for the Codex
+# reviewer - because which lane is with the reviewer is the one thing the
+# sidebar cannot otherwise show; every other state stays bare until
+# [states.glyphs] in the lookup gives it a glyph, and that table also
+# overrides this entry.
+DEFAULT_STATE_GLYPHS = {
+    "review": "rvx",
+}
+# A marker is at most three characters, letters allowed, because the sidebar
+# row is horizontally tight.
+GLYPH_MAX_CHARS = 3
 
 
 class ParseError(Exception):
@@ -233,7 +279,7 @@ def nonempty_string(v):
 def validate(doc):
     errors, warnings = [], []
     for key in doc:
-        if key not in ("meta", "models", "effort"):
+        if key not in ("meta", "models", "effort", "states"):
             warnings.append("unknown top-level key %s" % key)
     meta = doc.get("meta", {})
     if not isinstance(meta, dict):
@@ -292,6 +338,29 @@ def validate(doc):
         for word, alias in v.items():
             if not nonempty_string(alias):
                 errors.append("effort.aliases.%s must be a non-empty string" % word)
+    states = doc.get("states", {})
+    if not isinstance(states, dict):
+        errors.append("states must be a table")
+        states = {}
+    for key, v in states.items():
+        if key != "glyphs":
+            warnings.append("unknown key states.%s" % key)
+            continue
+        if not isinstance(v, dict):
+            errors.append("states.glyphs must be a table")
+            continue
+        for name, glyph in v.items():
+            where = "states.glyphs.%s" % name
+            if not nonempty_string(glyph):
+                errors.append("%s must be a non-empty string" % where)
+                continue
+            if len(glyph) > GLYPH_MAX_CHARS:
+                errors.append(
+                    "%s is %d characters; a marker is at most %d characters because the sidebar row is tight"
+                    % (where, len(glyph), GLYPH_MAX_CHARS)
+                )
+            if name not in STATE_KEYS:
+                warnings.append("%s names no pipeline state this release reports" % where)
     return errors, warnings
 
 
@@ -332,7 +401,7 @@ def model_alias(doc, model):
     for entry in models.values():
         if isinstance(entry, dict) and model in (entry.get("also_recorded_as") or []):
             return entry["alias"]
-    return model
+    return ""
 
 
 def check(path, catalog):
@@ -349,7 +418,7 @@ def check(path, catalog):
     for e in errors:
         print("error: %s" % e)
     if errors:
-        print("invalid: %s has %d error(s); labels fall back to raw names until it is fixed" % (path, len(errors)))
+        print("invalid: %s has %d error(s); labels fall back to unaliased names until it is fixed" % (path, len(errors)))
         return 1
     if os.path.isfile(catalog):
         models = catalog_models(catalog)
@@ -359,8 +428,40 @@ def check(path, catalog):
             known = recorded_names(doc)
             for model in models:
                 if model not in known:
-                    print("info: catalog model %s has no alias and shows its raw name" % model)
+                    print("info: catalog model %s has no alias and shows its unaliased name" % model)
     print("ok: %s is valid (%d warning(s))" % (path, len(warnings)))
+    return 0
+
+
+def marker(path, key):
+    """The display marker for one pipeline state, or an empty line for none.
+
+    A lookup file that cannot be parsed, or that has any schema error, is a
+    LOUD failure here rather than a silent fall back to the defaults: the
+    marker is the captain's own configuration surface, so a typo in it must be
+    visible instead of quietly showing him a stale or wrong symbol. That is the
+    deliberate difference from the alias path above, which keeps showing raw
+    model names so a worker still gets a label at all.
+    """
+    glyphs = dict(DEFAULT_STATE_GLYPHS)
+    if os.path.isfile(path):
+        try:
+            doc, errors, _ = load(path)
+        except (OSError, UnicodeDecodeError, ParseError) as exc:
+            sys.stderr.write("error: %s could not be read: %s\n" % (path, exc))
+            return 1
+        if errors:
+            sys.stderr.write(
+                "error: %s has %d error(s), so no marker is shown; run bin/fm-model-labels.sh check\n"
+                % (path, len(errors))
+            )
+            return 1
+        configured = doc.get("states", {}).get("glyphs", {})
+        if isinstance(configured, dict):
+            for name, glyph in configured.items():
+                if nonempty_string(glyph):
+                    glyphs[name] = glyph
+    print(glyphs.get(key, ""))
     return 0
 
 
@@ -368,6 +469,8 @@ def main():
     mode, path = sys.argv[1], sys.argv[2]
     if mode == "check":
         return check(path, sys.argv[3])
+    if mode == "marker":
+        return marker(path, sys.argv[3])
     model, effort = sys.argv[3], sys.argv[4]
     doc = {}
     if os.path.isfile(path):
@@ -377,8 +480,9 @@ def main():
             errors = ["unreadable"]
         if errors:
             doc = {}
-            sys.stderr.write("warning: %s is invalid, so labels use raw names; run bin/fm-model-labels.sh check\n" % path)
+            sys.stderr.write("warning: %s is invalid, so labels use unaliased names; run bin/fm-model-labels.sh check\n" % path)
     aliases = doc.get("effort", {}).get("aliases", {})
+    # An empty model line means no alias matched; cmd_label names the model.
     print(model_alias(doc, model) if model else "")
     print(aliases.get(effort, effort) if effort else "")
     return 0
@@ -398,6 +502,18 @@ label_field() {
   printf '%s' "$value"
 }
 
+# unaliased_model <model> <harness>: the display name for a model with no
+# alias. It drops a leading provider path and a leading "<harness>-" prefix,
+# because the label already names the runtime, and keeps the recorded name
+# whole when nothing would remain.
+unaliased_model() {
+  local name=${1##*/}
+  case "$name" in
+    "$2"-?*) name=${name#"$2"-} ;;
+  esac
+  printf '%s' "${name:-$1}"
+}
+
 cmd_label() {
   local id=${1:-} meta harness model effort out model_alias effort_alias label
   case "$id" in
@@ -409,15 +525,16 @@ cmd_label() {
   [ -n "$harness" ] || die "task $id records no harness"
   model=$(label_field "$meta" model)
   effort=$(label_field "$meta" effort)
-  model_alias=$model
+  model_alias=
   effort_alias=$effort
   if ! command -v python3 >/dev/null 2>&1; then
-    [ ! -e "$LABELS_FILE" ] || printf 'warning: python3 is not installed, so labels use raw names\n' >&2
+    [ ! -e "$LABELS_FILE" ] || printf 'warning: python3 is not installed, so labels use unaliased names\n' >&2
   elif out=$(model_labels_py aliases "$LABELS_FILE" "$model" "$effort"); then
     { IFS= read -r model_alias; IFS= read -r effort_alias; } <<<"$out"
   else
-    printf 'warning: %s could not be read, so labels use raw names\n' "$LABELS_FILE" >&2
+    printf 'warning: %s could not be read, so labels use unaliased names\n' "$LABELS_FILE" >&2
   fi
+  [ -n "$model_alias" ] || [ -z "$model" ] || model_alias=$(unaliased_model "$model" "$harness")
   label=$harness
   [ -z "$model_alias" ] || label="$label$SEP$model_alias"
   [ -z "$effort_alias" ] || label="$label$SEP$effort_alias"
@@ -429,8 +546,23 @@ cmd_check() {
   model_labels_py check "$LABELS_FILE" "$CATALOG_FILE"
 }
 
+# marker <state key>: the display marker for one pipeline state. Prints an
+# empty line - never a placeholder - for a state this release does not mark,
+# which is what keeps an unknown, absent, or unreadable state showing nothing
+# at all on the sidebar row. Exits non-zero, having said why, when the lookup
+# file itself is unreadable or invalid.
+cmd_marker() {
+  local key=${1:-}
+  case "$key" in
+    '' | */* | .*) die "marker needs a state key" 2 ;;
+  esac
+  command -v python3 >/dev/null 2>&1 || die "python3 is required to read $LABELS_FILE"
+  model_labels_py marker "$LABELS_FILE" "$key"
+}
+
 case "${1:-}" in
   label) shift; cmd_label "$@" ;;
+  marker) shift; cmd_marker "$@" ;;
   check) cmd_check ;;
   -h | --help) usage ;;
   *) usage >&2; exit 2 ;;
