@@ -256,6 +256,40 @@ run:
 EOF
 }
 
+# A RUNNING run whose active_steps table names the step under way. `axi status`
+# emits that table only while a step actually runs or fixes, so it is the only
+# place a running pipeline says WHICH step holds it - steps[] alone cannot, as
+# run_running above shows.
+run_running_active_step() {  # <branch> <step>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    $2,3m1s,4s,44121,""
+EOF
+}
+
+# The same table with the step column NOT first, so a reader that assumes
+# column position instead of reading the header picks the wrong cell.
+run_running_active_step_reordered() {  # <branch> <step>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  active_steps[1]{active_for,step,last_activity,agent_pid,round}:
+    3m1s,$2,4s,44121,""
+EOF
+}
+
 run_fixing() {  # <branch>
   cat <<EOF
 run:
@@ -2546,6 +2580,73 @@ test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
+# ---------------------------------------------------------------------------
+# A running pipeline names its active step, so a supervisor can tell a lane
+# sitting with the reviewer from one running tests or writing docs. The step
+# name is ADDED to the existing detail: every caller keys off state: and
+# source:, and the unchanged wording below guards the no-table case.
+test_running_run_names_its_active_step() {
+  reset_fakes
+  local d; d=$(new_case active-step-review)
+  make_repo_on_branch "$d/wt" fm/feat-as
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-as.meta" "window=fm:fm-feat-as" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_active_step fm/feat-as review)"
+  local out; out=$(run_crew_state "$d" feat-as)
+  assert_contains "$out" "state: working" "a running step is still working"
+  assert_contains "$out" "source: run-step" "the verdict still comes from the run step"
+  assert_contains "$out" "validating (running: review)" "the running step is named"
+  pass "a running run names its active step"
+}
+
+test_fixing_run_names_its_active_step() {
+  reset_fakes
+  local d; d=$(new_case active-step-fixing)
+  make_repo_on_branch "$d/wt" fm/feat-af
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-af.meta" "window=fm:fm-feat-af" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-af)"
+  local out; out=$(run_crew_state "$d" feat-af)
+  assert_contains "$out" "validating (fixing: review)" "the fixing round names its step"
+  pass "a fixing run names its active step"
+}
+
+# The column is found by NAME, not position: active_steps' header is the only
+# thing that says which cell is the step.
+test_active_step_column_is_read_by_name() {
+  reset_fakes
+  local d; d=$(new_case active-step-reordered)
+  make_repo_on_branch "$d/wt" fm/feat-ar
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ar.meta" "window=fm:fm-feat-ar" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_active_step_reordered fm/feat-ar document)"
+  local out; out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" "validating (running: document)" \
+    "the step column is located from the header, not by position"
+  assert_not_contains "$out" "3m1s" "a positional read would have printed the duration"
+  pass "the active step column is read by name"
+}
+
+# No active_steps table means no step name and the ORIGINAL wording, which is
+# what keeps every existing caller and its fixtures valid.
+test_running_run_without_active_steps_keeps_plain_wording() {
+  reset_fakes
+  local d; d=$(new_case active-step-absent)
+  make_repo_on_branch "$d/wt" fm/feat-an
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-an.meta" "window=fm:fm-feat-an" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-an)"
+  local out; out=$(run_crew_state "$d" feat-an)
+  assert_contains "$out" "validating (running)" "the plain wording survives"
+  assert_not_contains "$out" "validating (running:" "no step is invented when none is reported"
+  pass "a running run with no active step keeps the plain wording"
+}
+
+
+test_running_run_names_its_active_step
+test_fixing_run_names_its_active_step
+test_active_step_column_is_read_by_name
+test_running_run_without_active_steps_keeps_plain_wording
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict

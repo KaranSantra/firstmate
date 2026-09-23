@@ -4650,6 +4650,11 @@ if [ "$BACKEND" = herdr ]; then
       "$SPAWN_MODEL_LABEL" >/dev/null 2>&1; then
       echo "warning: could not show the model label for $ID in the Herdr sidebar; the worker is unaffected" >&2
     fi
+    # A launch and a relaunch alike start with no pipeline running, and a
+    # relaunch can inherit the previous endpoint's marker record. Clearing both
+    # here is what stops a fresh row claiming a lane is still in review.
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-state-marker.sh" clear "$ID" >/dev/null 2>&1 || true
     # The sage worker marker goes only on this worker's own child space: its
     # presentation journal must still correlate live to exactly the recorded
     # workspace. A flat placement in firstmate's or a parent space has no such

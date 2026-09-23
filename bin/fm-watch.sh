@@ -762,6 +762,16 @@ surface_endpoints_lost() {
   wake "$reason"
 }
 
+refresh_state_markers_detached() {
+  local w task
+  while IFS= read -r w; do
+    task=$(window_to_task "$w" "$STATE")
+    [ -n "$task" ] || continue
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null &
+  done < <(recorded_windows)
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -2169,6 +2179,7 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  refresh_state_markers_detached
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"

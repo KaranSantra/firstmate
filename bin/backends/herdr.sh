@@ -2399,7 +2399,6 @@ fm_backend_herdr_projection_group_rollback() {  # <session> <seeded-pane>
 #   FM_BACKEND_HERDR_PROJECTION_PANE_ID              the moved task pane
 #   FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID  the project parent space
 #   FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL         that parent's label
-#   FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH        Herdr's checkout path
 #   FM_BACKEND_HERDR_PROJECTION_EXACT                1 only when the child
 #     converged to exactly the task tab and pane under a verified parent, so
 #     an exact restart binding may be published
@@ -2416,7 +2415,6 @@ fm_backend_herdr_projection_group_task() {  # <session> <project-dir> <worktree>
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=""
-  FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH=""
   FM_BACKEND_HERDR_PROJECTION_EXACT=0
 
   project_root=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) \
@@ -2538,10 +2536,10 @@ EOF
     echo "error: herdr task terminal move could not be verified; the worker's terminal can no longer be identified exactly" >&2
     return 1
   fi
+  # shellcheck disable=SC2034  # fm-spawn.sh reads the projection binding
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$child
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=$moved_tab
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=$moved
-  FM_BACKEND_HERDR_PROJECTION_CHECKOUT_PATH=$checkout
 
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || focus_before=
   if [ -n "$focus_before" ]; then
@@ -2584,7 +2582,9 @@ EOF
     echo "warning: herdr project parent for this worker could not be verified exactly; it stays grouped without an exact restart binding" >&2
     return 0
   fi
+  # shellcheck disable=SC2034  # fm-spawn.sh reads the exact parent binding
   FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=$parent
+  # shellcheck disable=SC2034  # fm-spawn.sh reads the exact parent binding
   FM_BACKEND_HERDR_PROJECTION_EXACT=1
   return 0
 }
@@ -2892,7 +2892,9 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not publish its replacement binding; spawning flat" >&2
     return 2
   fi
+  # shellcheck disable=SC2034  # fm-spawn.sh reads the replacement binding
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=$new_tab
+  # shellcheck disable=SC2034  # fm-spawn.sh reads the replacement binding
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=$new_pane
   return 0
 }
@@ -3017,6 +3019,37 @@ fm_backend_herdr_report_worker_mark() {  # <session> <workspace_id>
   [ -n "$1" ] && [ -n "$2" ] || return 1
   fm_backend_herdr_cli "$1" workspace report-metadata "$2" \
     --source firstmate-worker-mark --token 'wt=●'
+}
+
+# The metadata source and token name carrying the pipeline-state marker. It is
+# deliberately NOT the firstmate-model-label source above: that source owns the
+# row's display agent, and a second writer of the same field would clobber the
+# model label every time the state changed. A token from its own source rides
+# alongside it instead, which is also why the marker can be retired on its own
+# without touching the label. Verified against Herdr 0.8.2: a pane carries one
+# source's display_agent and another source's token at the same time.
+FM_BACKEND_HERDR_STATE_MARKER_SOURCE=firstmate-state-marker
+FM_BACKEND_HERDR_STATE_MARKER_TOKEN=st
+
+# fm_backend_herdr_report_state_marker: show <marker> on <pane_id>'s sidebar row
+# as the display-only sign of what currently holds that lane. The pane id must
+# precede the options for the same Herdr 0.8.2 reason as the calls above.
+# Callers treat a failure as cosmetic.
+fm_backend_herdr_report_state_marker() {  # <session> <pane_id> <marker>
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source "$FM_BACKEND_HERDR_STATE_MARKER_SOURCE" \
+    --token "$FM_BACKEND_HERDR_STATE_MARKER_TOKEN=$3"
+}
+
+# fm_backend_herdr_clear_state_marker: remove that marker from <pane_id>, so a
+# row never keeps claiming a lane is in review once it is not. Clearing a token
+# that was never set is a no-op, which makes this safe to call unconditionally.
+fm_backend_herdr_clear_state_marker() {  # <session> <pane_id>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  fm_backend_herdr_cli "$1" pane report-metadata "$2" \
+    --source "$FM_BACKEND_HERDR_STATE_MARKER_SOURCE" \
+    --clear-token "$FM_BACKEND_HERDR_STATE_MARKER_TOKEN"
 }
 
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on

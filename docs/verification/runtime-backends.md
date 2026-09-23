@@ -1436,6 +1436,29 @@ The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.s
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Pane display metadata from two sources
+
+Verified on 2026-09-15 against Herdr 0.8.2 on macOS aarch64, in an isolated lab session.
+The pipeline-state marker rides `pane report-metadata --token` under its own `firstmate-state-marker` source rather than extending the model label's `--display-agent`, and this is the evidence for that choice.
+
+Refresh it with `bash tests/fm-backend-herdr-smoke.test.sh`, which exercises the real binary through `bin/backends/herdr.sh`'s own functions and skips cleanly where Herdr is not installed.
+
+```text
+1 label only:      {"display_agent":"claude · opus5 · xhi","tokens":null}
+2 marker set:      {"display_agent":"claude · opus5 · xhi","tokens":{"st":"◆cx"}}
+3 marker changed:  {"display_agent":"claude · opus5 · xhi","tokens":{"st":"◈fx"}}
+4 marker cleared:  {"display_agent":"claude · opus5 · xhi","tokens":null}
+5 cleared again:   {"display_agent":"claude · opus5 · xhi","tokens":null}  rc=0
+```
+
+Observed guarantees: one pane carries a `display_agent` from one metadata source and a `token` from a different source at the same time; changing the token in place leaves the display agent untouched; `--clear-token` removes only the token; and clearing an already-clear token succeeds, which is what a finished run does on most polls.
+That last property is why a lane can stop claiming it is in review without the row losing its model label.
+A second writer of `--display-agent` would instead have had to re-send the whole label on every state change, so the two-source shape is what keeps the label safe.
+
+What this evidence does NOT cover: where Herdr draws a pane token in its sidebar, and how wide those glyphs render.
+The lab viewer attaches a real foreground client but drains its pty without capturing it (`bin/fm-herdr-lab-viewer.py`), so no rendered screen can be read back here.
+The one shipped default, `rvx` for the review, is therefore plain ASCII, whose width does not depend on how a terminal renders symbols, and every marker is overridable in `config/model-labels.toml` without a code change.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
