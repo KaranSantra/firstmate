@@ -28,6 +28,9 @@ cat > "$LABELS" <<'TOML'
 schema = 1
 updated = "2026-01-01"
 
+[providers.aliases]
+grok = "xAI"
+
 [models."claude-opus-5"]
 provider = "anthropic"
 alias = "opus5"
@@ -67,6 +70,11 @@ fm_write_meta "$STATE_DIR/also.meta" harness=claude model=opus effort=xhigh
 out=$(label also) || fail "also_recorded_as: label exited non-zero"
 assert_equals 'claude · opus5 · xhi' "$out" "an also_recorded_as name renders the entry's alias"
 pass "label: also_recorded_as match"
+
+fm_write_meta "$STATE_DIR/grok.meta" harness=grok model=grok-4.6 effort=high
+out=$(label grok) || fail "provider alias: label exited non-zero"
+assert_equals 'xAI · grok-4.6 · hi' "$out" "a harness provider alias renders ahead of the raw model"
+pass "label: provider alias"
 
 fm_write_meta "$STATE_DIR/unknown.meta" harness=codex model=gpt-9-example effort=ultra
 out=$(label unknown) || fail "unknown model: label exited non-zero"
@@ -207,7 +215,7 @@ text=$(label exact) || fail "herdr call: label exited non-zero"
 herdr_backend fm_backend_herdr_report_display_agent fm-labels-fake 'w1:p2' "$text" || fail "herdr call: label report exited non-zero"
 herdr_backend fm_backend_herdr_report_worker_mark fm-labels-fake w7 || fail "herdr call: worker mark exited non-zero"
 assert_equals "$(joined pane report-metadata 'w1:p2' --source firstmate-model-label \
-  --display-agent 'claude · opus5 · hi' --session fm-labels-fake)" "$(sed -n 1p "$HERDR_LOG")" \
+  --display-agent 'claude · opus5 · hi' --token 'agent=claude · opus5 · hi' --session fm-labels-fake)" "$(sed -n 1p "$HERDR_LOG")" \
   "the pane id precedes every option in the label call"
 assert_equals "$(joined workspace report-metadata w7 --source firstmate-worker-mark \
   --token 'wt=●' --session fm-labels-fake)" "$(sed -n 2p "$HERDR_LOG")" \

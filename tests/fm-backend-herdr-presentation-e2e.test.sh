@@ -716,6 +716,33 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr endpoint IDs between opted-out and grouped paths: $(diff "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized")"
 pass "real Herdr lab: Treehouse commands and metadata shape are identical to the flat path except for endpoint IDs and spawn incarnation"
 
+# ------------------------------------------------------------------
+# Regression: the fresh-worker path must never publish the version 3 journal
+# before its worktree exists.
+# ------------------------------------------------------------------
+# An upstream merge reintroduced an early projected-launch block that grouped a
+# fresh worker in its pre-worktree launching space and called the version 3
+# journal create with only <state> <id>. The version 3 journal requires the
+# worktree checkout path, so that call fails with "needs an absolute checkout
+# path" and aborts every presentation-on spawn. The fix keeps the fresh path at
+# HERDR_GROUP_PENDING and defers journal creation to the post-worktree grouping
+# step. The grouped spawn above reuses the same captured stderr and journal, so
+# pin the exact failure mode here without a second pool allocation: the spawn
+# never printed the pre-worktree failure, and its journal binds a checkout path
+# that already existed as the worker's physical worktree when it was written.
+grep -F "needs an absolute checkout path" "$TMP_ROOT/on.err" >/dev/null 2>&1 \
+  && fail "grouped spawn tripped the pre-worktree journal-create regression: $(cat "$TMP_ROOT/on.err")"
+SHAPE_JOURNAL_CHECKOUT=$(journal_field "$HOME_DIR/state/shape.herdr-presentation" checkout_path)
+case "$SHAPE_JOURNAL_CHECKOUT" in
+  /*) ;;
+  *) fail "grouped spawn journal did not record an absolute worktree checkout path: '$SHAPE_JOURNAL_CHECKOUT'" ;;
+esac
+[ -d "$SHAPE_JOURNAL_CHECKOUT" ] \
+  || fail "grouped spawn journal checkout path is not an existing worktree, so the journal was published before the worktree existed: '$SHAPE_JOURNAL_CHECKOUT'"
+[ "$SHAPE_JOURNAL_CHECKOUT" = "$(cd "$ON_WT" && pwd -P)" ] \
+  || fail "grouped spawn journal checkout path does not match the worker's physical worktree"
+pass "real Herdr lab: a fresh presentation-on spawn defers grouping until its worktree exists and never calls the journal create without a checkout path"
+
 # A second worker on the same project, with an fm- prefixed identity, joins the
 # same parent under its concise label.
 write_ship_brief "$HOME_DIR" fm-second 'Second grouped worker on the same project.'
