@@ -22,10 +22,10 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
-# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
-# deliberately restricted, so a case that needs jq exposes this one rather than
-# depending on the host keeping jq in one of those four directories.
-REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
+# The merge path reads glab's and the AWS CLI's JSON with the real jq, and
+# BASE_PATH is deliberately restricted, so a case that needs jq exposes this one
+# rather than depending on the host keeping jq in one of those four directories.
+REAL_JQ=$(command -v jq) || fail "these tests read glab's and the AWS CLI's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -350,6 +350,23 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://us-east-1.console.aws.amazon.com.evil.net/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=eu-west-1'
+  'https://console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1'
+  'https://console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1/details/'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1/detail?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region='
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/0?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/01?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1&extra=1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/../pull-requests/1?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R.git/pull-requests/1?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/a/b/pull-requests/1?region=us-east-1'
+  'http://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=us-east-1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=US-EAST-1'
+  'https://useast1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull-requests/1?region=useast1'
+  'https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/R/pull_requests/1?region=us-east-1'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -416,6 +433,41 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  while IFS='|' read -r url host path number region; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical CodeCommit pull request URL"
+    [ "$FM_PR_PROVIDER" = codecommit ] || fail "parser did not tag a CodeCommit URL as codecommit"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical CodeCommit URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong CodeCommit console host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong CodeCommit repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong CodeCommit pull request id"
+    [ "$FM_PR_REGION" = "$region" ] || fail "parser returned wrong CodeCommit region"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a CodeCommit URL"
+  done <<'EOF'
+https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/Example-Payments-Client/pull-requests/27?region=us-east-1|us-east-1.console.aws.amazon.com|Example-Payments-Client|27|us-east-1
+https://eu-west-2.console.aws.amazon.com/codesuite/codecommit/repositories/r/pull-requests/1?region=eu-west-2|eu-west-2.console.aws.amazon.com|r|1|eu-west-2
+https://ap-southeast-3.console.aws.amazon.com/codesuite/codecommit/repositories/repo_name.with-dots/pull-requests/123456?region=ap-southeast-3|ap-southeast-3.console.aws.amazon.com|repo_name.with-dots|123456|ap-southeast-3
+EOF
+  # The AWS profile is a credential selector, not identity, so it is validated
+  # only in the shape a profile name takes and never inferred from a URL.
+  fm_pr_codecommit_remote_profile \
+    'codecommit::us-east-1://AWSAdministratorAccess-123456789012@Example-Payments-Client' \
+    Example-Payments-Client us-east-1 \
+    || fail "profile derivation rejected a canonical CodeCommit remote"
+  [ "$FM_PR_CREDENTIAL" = AWSAdministratorAccess-123456789012 ] \
+    || fail "profile derivation returned the wrong AWS profile"
+  fm_pr_codecommit_remote_profile 'codecommit://prof@Repo' Repo us-east-1 \
+    || fail "profile derivation rejected a region-less CodeCommit remote"
+  for remote in \
+    'codecommit::us-east-1://AWSAdministratorAccess-1@Other-Repo' \
+    'codecommit::eu-west-1://prof@Repo' \
+    'codecommit::us-east-1://Repo' \
+    'codecommit::us-east-1://-dashprofile@Repo' \
+    'https://github.com/o/Repo'; do
+    ! fm_pr_codecommit_remote_profile "$remote" Repo us-east-1 \
+      || fail "profile derivation accepted an unusable remote: $remote"
+  done
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
@@ -2204,6 +2256,353 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# The CodeCommit console fixture. A placeholder repository in a real region
+# shape, and a profile that exists only as remote text.
+CC_REGION=us-east-1
+CC_HOST="$CC_REGION.console.aws.amazon.com"
+CC_REPO=Fixture-Repo
+CC_PROFILE=FixtureAccess-000000000000
+CC_URL="https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27?region=$CC_REGION"
+CC_HEAD=cccccccccccccccccccccccccccccccccccccccc
+
+# An aws mock answering the one read fm-pr-check.sh and the watch poll make,
+# plus a git remote carrying the profile, because arming derives the profile
+# from that remote. Its answers are files in the case dir, so a test changes one
+# condition at a time, and the defaults are the open unmerged pull request
+# arming expects.
+add_codecommit_fixture() {
+  local dir=$1
+  cat > "$dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/aws.log"
+[ ! -e "$dir/cc-fail" ] || exit 255
+status=\$(cat "$dir/cc-status" 2>/dev/null || printf 'OPEN')
+merged=\$(cat "$dir/cc-merged" 2>/dev/null || printf 'false')
+repo=\$(cat "$dir/cc-repo" 2>/dev/null || printf '%s' "$CC_REPO")
+case "\${2:-}" in
+  get-pull-request)
+    printf '{"pullRequest":{"pullRequestId":"27","title":"fixture","pullRequestStatus":"%s","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"%s","sourceCommit":"%s","destinationReference":"refs/heads/main","mergeMetadata":{"isMerged":%s}}]}}\n' \\
+      "\$status" "\$repo" "$CC_HEAD" "\$merged"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/aws"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  : > "$dir/aws.log"
+  git -C "$dir/wt" init -q
+  git -C "$dir/wt" remote add origin "codecommit::$CC_REGION://$CC_PROFILE@$CC_REPO"
+}
+
+test_codecommit_arming_is_static_and_private() {
+  local dir rc sidecar expected
+  dir=$(make_case codecommit-arming)
+  write_task_meta "$dir"
+  add_codecommit_fixture "$dir"
+
+  set +e
+  run_check_entry "$dir" task-a "$CC_URL" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "codecommit-arming: arming a CodeCommit poll should succeed"
+
+  # The watcher program stays byte-for-byte the shipped source: the identity and
+  # the profile are data in the sidecar, never interpolated into shell source.
+  cmp -s "$POLL" "$dir/home/state/task-a.check.sh" \
+    || fail "codecommit-arming: published check was not byte-for-byte static"
+  assert_no_grep "$CC_REPO" "$dir/home/state/task-a.check.sh" \
+    "codecommit-arming: the repository leaked into the generated check source"
+  assert_no_grep "$CC_PROFILE" "$dir/home/state/task-a.check.sh" \
+    "codecommit-arming: the AWS profile leaked into the generated check source"
+
+  [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] \
+    || fail "codecommit-arming: published check mode was not 0600"
+  [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] \
+    || fail "codecommit-arming: published sidecar mode was not 0600"
+  [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
+    || fail "codecommit-arming: published registration mode was not 0600"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "codecommit-arming: published poll provenance or metadata binding was invalid"
+
+  # The sidecar is the five identity fields plus the credential line only a
+  # codecommit record may carry.
+  sidecar=$(cat "$dir/home/state/task-a.pr-poll")
+  expected=$(printf 'codecommit\n%s\n%s\n%s\n27\n%s' "$CC_URL" "$CC_HOST" "$CC_REPO" "$CC_PROFILE")
+  [ "$sidecar" = "$expected" ] || fail "codecommit-arming: published sidecar bytes were not exact"
+
+  assert_grep "pr=$CC_URL" "$dir/home/state/task-a.meta" \
+    "codecommit-arming: the canonical URL was not recorded"
+  assert_grep "pr_head=$CC_HEAD" "$dir/home/state/task-a.meta" \
+    "codecommit-arming: the exact head was not recorded"
+  pass "arming a CodeCommit watch keeps the poll static and confines the profile to the sidecar"
+}
+
+# Every CodeCommit poll case is exercised through both entry paths a watcher
+# cycle uses: the published check reading its own sidecar, and the --validated
+# argument form fm-watch.sh passes from the validated snapshot. They must answer
+# the same, so both are asserted against the same expectation.
+assert_codecommit_poll() {  # <dir> <expected> <message>
+  local dir=$1 expected=$2 message=$3 self validated
+  self=$(run_poll "$dir")
+  validated=$(PATH="$dir/fakebin:$BASE_PATH" bash "$dir/home/state/task-a.check.sh" \
+    --validated codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 "$CC_PROFILE")
+  [ "$self" = "$expected" ] || fail "$message (the sidecar entry path answered '$self')"
+  [ "$validated" = "$expected" ] || fail "$message (the --validated entry path answered '$validated')"
+}
+
+# The poll is what actually detects a CodeCommit merge, so a wrong answer here
+# is a false landed merge rather than silence.
+test_codecommit_merge_watch() {
+  local dir state out
+  dir=$(make_case codecommit-merge-watch)
+  write_task_meta "$dir"
+  add_codecommit_fixture "$dir"
+  state="$dir/home/state"
+
+  run_check_entry "$dir" task-a "$CC_URL" >/dev/null 2>/dev/null \
+    || fail "codecommit-merge-watch: could not arm a CodeCommit poll"
+  : > "$dir/aws.log"
+
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: an open pull request emitted a merge"
+  assert_grep "get-pull-request --pull-request-id 27 --region $CC_REGION --profile $CC_PROFILE" \
+    "$dir/aws.log" \
+    "codecommit-merge-watch: the poll did not address the AWS CLI with the recorded region and profile"
+
+  # CodeCommit closes a pull request whether it was merged or abandoned, so a
+  # closed and unmerged one must stay silent: only isMerged is the signal.
+  printf 'CLOSED' > "$dir/cc-status"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a closed but unmerged pull request emitted a merge"
+
+  printf 'true' > "$dir/cc-merged"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: a merged pull request did not emit exactly one merged line"
+
+  # The pull request stays merged through these, so each one proves the poll
+  # stays silent on what it cannot read or match rather than on nothing.
+  : > "$dir/cc-fail"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a failed AWS call emitted a merge"
+  rm -f "$dir/cc-fail"
+  printf 'Other-Repo' > "$dir/cc-repo"
+  assert_codecommit_poll "$dir" "" \
+    "codecommit-merge-watch: a pull request targeting another repository emitted a merge"
+  rm -f "$dir/cc-repo"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: the merged fixture stopped being read after the silent cases"
+
+  # A doctored sidecar cannot redirect the poll at another region, repository or
+  # number, and cannot smuggle a credential the arming validator would refuse.
+  # Every component is revalidated before the AWS CLI is reached at all.
+  : > "$dir/aws.log"
+  while IFS='|' read -r sc_host sc_path sc_number sc_credential; do
+    [ -n "$sc_host" ] || continue
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      codecommit "$CC_URL" "$sc_host" "$sc_path" "$sc_number" "$sc_credential" \
+      > "$state/task-a.pr-poll"
+    out=$(run_poll "$dir")
+    [ -z "$out" ] || fail "codecommit-merge-watch: a doctored sidecar emitted a merge: $sc_host|$sc_path|$sc_number|$sc_credential"
+  done <<EOF
+eu-west-1.console.aws.amazon.com|$CC_REPO|27|$CC_PROFILE
+$CC_HOST|Other-Repo|27|$CC_PROFILE
+$CC_HOST|$CC_REPO|28|$CC_PROFILE
+$CC_HOST|$CC_REPO|27|-Not-A-Profile
+$CC_HOST|$CC_REPO|27|
+EOF
+  [ ! -s "$dir/aws.log" ] \
+    || fail "codecommit-merge-watch: a doctored sidecar still reached the AWS CLI"
+
+  # A codecommit record must carry a profile: without one the AWS CLI would fall
+  # back to the default credential chain the profile exists to override.
+  printf '%s\n%s\n%s\n%s\n%s\n' codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 \
+    > "$state/task-a.pr-poll"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "codecommit-merge-watch: a sidecar carrying no AWS profile emitted a merge"
+
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    codecommit "$CC_URL" "$CC_HOST" "$CC_REPO" 27 "$CC_PROFILE" > "$state/task-a.pr-poll"
+  assert_codecommit_poll "$dir" merged \
+    "codecommit-merge-watch: the restored sidecar did not read the merge again"
+  pass "a CodeCommit merge wakes the watch only on isMerged for its own repository"
+}
+
+# Replace the fixture's aws with one that cannot answer for this repository, the
+# two ways an armed CodeCommit watch would otherwise go permanently silent: an
+# expired SSO session (non-zero, diagnosis on stderr only) and a successful read
+# whose only target is another repository. Each leaves the operator somewhere
+# different, so each has to be reported apart.
+break_codecommit_aws() {
+  local dir=$1 mode=$2
+  case "$mode" in
+    unauthenticated)
+      cat > "$dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/aws.log"
+echo 'Error loading SSO Token: Token for pa-team.awsapps.com does not exist' >&2
+exit 255
+SH
+      ;;
+    foreign-target)
+      cat > "$dir/fakebin/aws" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/aws.log"
+printf '{"pullRequest":{"pullRequestId":"27","pullRequestStatus":"OPEN","revisionId":"rev-1","pullRequestTargets":[{"repositoryName":"Other-Repo","sourceCommit":"%s","destinationReference":"refs/heads/main"}]}}\n' \\
+  "$CC_HEAD"
+exit 0
+SH
+      ;;
+  esac
+  chmod +x "$dir/fakebin/aws"
+}
+
+# An AWS profile is only shape-checked against the remote, so an expired SSO
+# session still passes every check before this read. Arming must refuse rather
+# than drop pr_head and report itself armed, because the poll is silent on every
+# error and nothing would ever surface the dead watch.
+test_codecommit_arming_refuses_an_unreadable_pull_request() {
+  local dir rc variant
+  for variant in unauthenticated foreign-target; do
+    dir=$(make_case "codecommit-arm-$variant")
+    write_task_meta "$dir"
+    add_codecommit_fixture "$dir"
+    break_codecommit_aws "$dir" "$variant"
+
+    set +e
+    run_check_entry "$dir" task-a "$CC_URL" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-arm-$variant: arming should refuse when the pull request cannot be read"
+    assert_no_grep 'armed:' "$dir/stdout" \
+      "codecommit-arm-$variant: a refused arming still reported itself armed"
+    case "$variant" in
+      unauthenticated)
+        # The session is the problem, so the refusal names the profile and the
+        # one command that repairs it.
+        assert_grep "$CC_PROFILE" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the AWS profile that could not read the pull request"
+        assert_grep "aws sso login --profile $CC_PROFILE" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the command that re-authenticates that session"
+        assert_grep 'bin/fm-pr-check.sh' "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should say to re-run the check"
+        ;;
+      foreign-target)
+        # The session is fine and the pull request was read, so telling the
+        # operator to re-authenticate would send them in circles.
+        assert_grep "does not target repository $CC_REPO" "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should say the pull request targets another repository"
+        assert_grep 'it targets Other-Repo' "$dir/stderr" \
+          "codecommit-arm-$variant: the refusal should name the repository actually targeted"
+        assert_no_grep 're-authenticate' "$dir/stderr" \
+          "codecommit-arm-$variant: a valid session must not be blamed on authentication"
+        assert_no_grep 'aws sso login' "$dir/stderr" \
+          "codecommit-arm-$variant: a valid session must not be sent through an SSO login"
+        ;;
+    esac
+    assert_absent "$dir/home/state/task-a.check.sh" \
+      "codecommit-arm-$variant: a refused arming left a check behind"
+    assert_absent "$dir/home/state/task-a.pr-poll" \
+      "codecommit-arm-$variant: a refused arming left a sidecar behind"
+    assert_absent "$dir/home/state/task-a.pr-poll-registration" \
+      "codecommit-arm-$variant: a refused arming left a registration behind"
+    assert_no_grep "pr=$CC_URL" "$dir/home/state/task-a.meta" \
+      "codecommit-arm-$variant: a refused arming still recorded the canonical URL"
+  done
+  pass "arming a CodeCommit watch refuses an unreadable and a foreign pull request, each named apart"
+}
+
+test_codecommit_arming_refuses_without_a_profile() {
+  local dir rc
+  # A remote naming no profile, and a remote naming another repository, must
+  # both refuse: neither can select the right credentials, and the default
+  # credential chain is what the profile exists to override.
+  for variant in no-profile foreign-repo; do
+    dir=$(make_case "codecommit-arm-$variant")
+    write_task_meta "$dir"
+    add_codecommit_fixture "$dir"
+    case "$variant" in
+      no-profile) git -C "$dir/wt" remote set-url origin "codecommit::$CC_REGION://$CC_REPO" ;;
+      foreign-repo) git -C "$dir/wt" remote set-url origin "codecommit::$CC_REGION://$CC_PROFILE@Other-Repo" ;;
+    esac
+
+    set +e
+    run_check_entry "$dir" task-a "$CC_URL" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "codecommit-arm-$variant: arming should refuse"
+    assert_grep 'names no AWS profile' "$dir/stderr" \
+      "codecommit-arm-$variant: the refusal should name the missing profile"
+    assert_absent "$dir/home/state/task-a.check.sh" \
+      "codecommit-arm-$variant: a refused arming left a check behind"
+    assert_absent "$dir/home/state/task-a.pr-poll" \
+      "codecommit-arm-$variant: a refused arming left a sidecar behind"
+  done
+  pass "arming a CodeCommit watch refuses when the worktree remote names no usable AWS profile"
+}
+
+# The console reaches one pull request by several spellings, and the address bar
+# carries "/details" while a hand-shortened link drops the region query. Arming
+# from each of them must land on one stored identity, because bin/fm-pr-poll.sh
+# rebuilds the URL from the stored parts: a spelling that is accepted but not
+# normalised arms a watch that can never match and so never reports the merge.
+# Every case therefore drives the real poll rather than only the parser.
+test_codecommit_console_url_normalisation() {
+  local dir spelling id rc sidecar_url recorded
+  dir=$(make_case codecommit-url-normalisation)
+  add_codecommit_fixture "$dir"
+  printf 'CLOSED' > "$dir/cc-status"
+  printf 'true' > "$dir/cc-merged"
+
+  id=0
+  while IFS= read -r spelling; do
+    [ -n "$spelling" ] || continue
+    id=$((id + 1))
+    write_task_meta "$dir" "task-$id"
+
+    set +e
+    run_check_entry "$dir" "task-$id" "$spelling" >/dev/null 2>"$dir/stderr-$id"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "codecommit-url-normalisation: arming was refused for $spelling"
+
+    recorded=$(grep '^pr=' "$dir/home/state/task-$id.meta" | tail -1)
+    [ "$recorded" = "pr=$CC_URL" ] \
+      || fail "codecommit-url-normalisation: $spelling recorded '$recorded', not the canonical URL"
+    sidecar_url=$(sed -n '2p' "$dir/home/state/task-$id.pr-poll")
+    [ "$sidecar_url" = "$CC_URL" ] \
+      || fail "codecommit-url-normalisation: $spelling stored sidecar URL '$sidecar_url', not the canonical URL"
+
+    # The merge signal itself, through the sidecar entry path the watcher uses.
+    [ "$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
+        bash "$dir/home/state/task-$id.check.sh")" = merged ] \
+      || fail "codecommit-url-normalisation: a watch armed from $spelling never reported the merge"
+  done <<EOF
+$CC_URL
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27/details?region=$CC_REGION
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27/details
+https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27
+EOF
+
+  # Normalising the region query must not weaken it: a query naming a region the
+  # host does not is still a contradiction and is refused rather than resolved
+  # to the host's region.
+  write_task_meta "$dir" task-bad
+  set +e
+  run_check_entry "$dir" task-bad \
+    "https://$CC_HOST/codesuite/codecommit/repositories/$CC_REPO/pull-requests/27?region=eu-west-1" \
+    >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "codecommit-url-normalisation: a query naming another region was accepted"
+  assert_absent "$dir/home/state/task-bad.pr-poll" \
+    "codecommit-url-normalisation: a refused contradictory region left a sidecar behind"
+
+  pass "every console spelling of a CodeCommit pull request arms one canonical watch"
+}
+
 # --- poll-path merge authority ----------------------------------------------
 
 write_away_record() {  # <dir> [<fm-afk-contract.sh enter args>...]
@@ -2791,6 +3190,7 @@ SH
 }
 
 test_parser_matrix
+test_codecommit_console_url_normalisation
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
@@ -2828,3 +3228,7 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_codecommit_arming_is_static_and_private
+test_codecommit_merge_watch
+test_codecommit_arming_refuses_without_a_profile
+test_codecommit_arming_refuses_an_unreadable_pull_request

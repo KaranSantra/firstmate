@@ -328,6 +328,46 @@ else
   echo "note: claude not installed; skipping the real-agent busy_state check" >&2
 fi
 
+# --- sidebar label and pipeline-state marker, against the REAL binary --------
+
+# The marker rides its own metadata source precisely so a state change can never
+# cost the row its model label. Nothing but a real Herdr can settle whether two
+# sources coexist on one pane, so this is proven here rather than assumed from a
+# fake that would only replay the assumption.
+pane_meta() {  # <jq filter>
+  herdr pane get "$PANE_ID" --session "$SESSION" 2>/dev/null | jq -r "$1"
+}
+
+SIDEBAR_LABEL='claude · opus5 · xhi'
+fm_backend_herdr_report_display_agent "$SESSION" "$PANE_ID" "$SIDEBAR_LABEL" \
+  || fail "the real binary rejected the display-agent call"
+[ "$(pane_meta '.result.pane.display_agent // empty')" = "$SIDEBAR_LABEL" ] \
+  || fail "the display agent did not land on the pane"
+
+fm_backend_herdr_report_state_marker "$SESSION" "$PANE_ID" '◆cx' \
+  || fail "the real binary rejected the state-marker call"
+[ "$(pane_meta '.result.pane.tokens.st // empty')" = '◆cx' ] \
+  || fail "the state marker did not land on the pane"
+[ "$(pane_meta '.result.pane.display_agent // empty')" = "$SIDEBAR_LABEL" ] \
+  || fail "setting the state marker overwrote the model label"
+
+fm_backend_herdr_report_state_marker "$SESSION" "$PANE_ID" '◉ts' \
+  || fail "the real binary rejected a state-marker change"
+[ "$(pane_meta '.result.pane.tokens.st // empty')" = '◉ts' ] \
+  || fail "the state marker did not change in place"
+pass "real herdr: the state marker sets and changes beside the model label"
+
+fm_backend_herdr_clear_state_marker "$SESSION" "$PANE_ID" \
+  || fail "the real binary rejected the state-marker clear"
+[ -z "$(pane_meta '.result.pane.tokens.st // empty')" ] \
+  || fail "the state marker survived its clear, which is the stale claim this must never make"
+[ "$(pane_meta '.result.pane.display_agent // empty')" = "$SIDEBAR_LABEL" ] \
+  || fail "clearing the state marker took the model label with it"
+# Clearing a marker that is not set is what a finished run does on most polls.
+fm_backend_herdr_clear_state_marker "$SESSION" "$PANE_ID" \
+  || fail "clearing an already-clear marker must stay best-effort"
+pass "real herdr: clearing the marker leaves the label and is idempotent"
+
 # --- kill -----------------------------------------------------------------
 
 fm_backend_herdr_kill "$TARGET"

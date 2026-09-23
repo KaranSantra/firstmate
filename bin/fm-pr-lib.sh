@@ -4,13 +4,24 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub, an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and the bare
+# repository name on CodeCommit. A GitLab project can sit at any depth, so no
+# owner/repository pair can address one and the sidecar carries the whole path
+# instead. GitLab also runs on self-hosted instances, and a CodeCommit console
+# host names its own region, so the host is part of that identity rather than a
+# constant. Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
+#
+# CodeCommit alone needs one datum that no URL carries: the local AWS profile
+# that selects the credentials for its account. It is a credential selector and
+# not identity, so it is kept out of the five identity fields and appended to
+# the sidecar as an optional sixth line that only a codecommit record may
+# carry. A GitHub or GitLab sidecar is byte-identical to one written before
+# CodeCommit existed. The registration already hashes the whole sidecar, so
+# that sixth line is bound against tampering by the same data hash that binds
+# the identity, and a swapped profile cannot point a poll at a same-named
+# repository in another AWS account without failing that hash.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -24,11 +35,14 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_REGION=
+FM_PR_CREDENTIAL=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
 FM_PR_DATA_PATH=
 FM_PR_DATA_NUMBER=
+FM_PR_DATA_CREDENTIAL=
 FM_PR_META_PROVIDER=
 FM_PR_META_URL=
 FM_PR_META_HOST=
@@ -56,6 +70,7 @@ FM_PR_POLL_EXPECT_URL=
 FM_PR_POLL_EXPECT_HOST=
 FM_PR_POLL_EXPECT_PATH=
 FM_PR_POLL_EXPECT_NUMBER=
+FM_PR_POLL_EXPECT_CREDENTIAL=
 FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
@@ -68,6 +83,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_CREDENTIAL=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -160,15 +176,100 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
-# is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# A CodeCommit console host names its own region, so the region is read back
+# out of the host rather than stored separately. Only the exact
+# "<region>.console.aws.amazon.com" spelling is accepted, which refuses a
+# lookalike such as us-east-1.console.aws.amazon.com.example.net for the same
+# reason the GitLab host rule refuses github.com: the shape alone must never be
+# enough to arm a watch against an attacker-chosen host.
+fm_pr_codecommit_region_valid() {
+  local region=${1-}
+  local LC_ALL=C
+  [ "${#region}" -ge 5 ] && [ "${#region}" -le 32 ] || return 1
+  [[ "$region" =~ ^[a-z]{2,}(-[a-z]+)+-[1-9][0-9]*$ ]]
+}
+
+# CodeCommit repository names are 1-100 characters of [A-Za-z0-9._-] and may
+# not end in ".git", which would otherwise collide with the clone URL suffix.
+# "." and ".." are refused because the name is also a path segment here.
+fm_pr_codecommit_repo_valid() {
+  local repo=${1-}
+  local LC_ALL=C
+  [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || return 1
+  case "$repo" in
+    .|..|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+# The AWS profile reaches the CLI as the value of --profile, so a name starting
+# with "-" would be read as another option and is refused outright. The rest of
+# the character class is what an AWS config profile name can actually hold,
+# including the "+=,@" that SSO role names may carry.
+fm_pr_aws_profile_valid() {
+  local profile=${1-}
+  local LC_ALL=C
+  [ "${#profile}" -ge 1 ] && [ "${#profile}" -le 128 ] || return 1
+  case "$profile" in
+    -*|*[!A-Za-z0-9._@=,+-]*) return 1 ;;
+  esac
+}
+
+# Derive the AWS profile from a repository's own git remote, which is the only
+# place it is recorded: the git-remote-codecommit helper carries it as the
+# userinfo of "codecommit::<region>://<profile>@<repo>" or
+# "codecommit://<profile>@<repo>". The repository the remote names must be the
+# one the PR URL named, and a remote that pins a region must pin the same one,
+# so a remote belonging to another repository can never select credentials for
+# this merge. A remote with no profile yields nothing rather than falling back
+# to the default credential chain, because that chain is exactly what the
+# profile exists to override.
+# Sets FM_PR_CREDENTIAL on success.
+fm_pr_codecommit_remote_profile() {  # <remote-url> <expected-repo> <expected-region>
+  local remote=${1-} expected_repo=${2-} expected_region=${3-} rest region profile repo
+  local LC_ALL=C
+  FM_PR_CREDENTIAL=
+  case "$remote" in
+    codecommit::*://*) rest=${remote#codecommit::}; region=${rest%%://*}; rest=${rest#*://} ;;
+    codecommit://*) rest=${remote#codecommit://}; region= ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$region" ]; then
+    fm_pr_codecommit_region_valid "$region" || return 1
+    [ "$region" = "$expected_region" ] || return 1
+  fi
+  case "$rest" in
+    *@*) profile=${rest%%@*}; repo=${rest#*@} ;;
+    *) return 1 ;;
+  esac
+  case "$repo" in
+    *@*|*/*) return 1 ;;
+  esac
+  fm_pr_aws_profile_valid "$profile" || return 1
+  fm_pr_codecommit_repo_valid "$repo" || return 1
+  [ "$repo" = "$expected_repo" ] || return 1
+  # Consumed by bin/fm-pr-check.sh and bin/fm-pr-merge.sh.
+  # shellcheck disable=SC2034
+  FM_PR_CREDENTIAL=$profile
+}
+
+# Parse a canonical PR, MR, or CodeCommit pull request URL into the
+# provider-tagged identity. Validation is strict and per provider: the GitHub
+# username and repository rules are unchanged, GitLab gets its own host and
+# namespace rules rather than a loosened GitHub rule, and CodeCommit gets its
+# own region and repository rules.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
 # them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
 # instead, so a merge request on any instance resolves without a hardcoded host.
+# FM_PR_REGION is additionally set for codecommit, read back out of the console
+# host, because the AWS CLI takes the region as its own argument.
+#
+# The CodeCommit console spells one pull request several ways, so that parser
+# accepts each of them and stores a single canonical form rather than whichever
+# spelling it was handed. Only the region query is ever accepted, and only when
+# it agrees with the region the host already names; no other query is allowed,
+# because a stored identity must always reconstruct its own URL.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -179,6 +280,7 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
+  FM_PR_REGION=
   pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
@@ -199,7 +301,10 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
-  [[ "$raw" =~ $pattern ]] || return 1
+  if ! [[ "$raw" =~ $pattern ]]; then
+    fm_pr_codecommit_url_parse "$raw"
+    return
+  fi
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
   fm_pr_gitlab_host_valid "$host" || return 1
@@ -209,6 +314,48 @@ fm_pr_url_parse() {
   FM_PR_HOST=$host
   FM_PR_PATH=$path
   FM_PR_NUMBER=${BASH_REMATCH[3]}
+  return 0
+}
+
+# Parse a CodeCommit console pull request URL. Kept apart from the two forge
+# patterns above so its region agreement check reads as one rule.
+#
+# The console reaches one pull request by several spellings, so this parser
+# accepts them all and stores exactly one. The "/details" segment is what the
+# console's own address bar carries, and the region query is dropped whenever a
+# link is shortened by hand; both were refused before, which rejected most real
+# links, including the ones firstmate's own workers report. Accepting a spelling
+# without normalising it would be worse than refusing it: bin/fm-pr-poll.sh is
+# byte-static and rebuilds the URL from the stored parts, so a stored "/details"
+# URL would arm a watch that can never match and therefore never fire. Every
+# accepted spelling is therefore rewritten to the canonical form here, before
+# any consumer sees it, and the canonical form re-parses to itself.
+fm_pr_codecommit_url_parse() {  # <raw-url>
+  local raw=${1-} pattern host repo number region query
+  local LC_ALL=C
+  pattern='^https://([a-z0-9.-]{1,253})/codesuite/codecommit/repositories/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)(/details)?(\?region=([a-z0-9-]{1,32}))?$'
+  [[ "$raw" =~ $pattern ]] || return 1
+  host=${BASH_REMATCH[1]}
+  repo=${BASH_REMATCH[2]}
+  number=${BASH_REMATCH[3]}
+  query=${BASH_REMATCH[6]}
+  region=${host%.console.aws.amazon.com}
+  [ "$host" = "$region.console.aws.amazon.com" ] || return 1
+  fm_pr_codecommit_region_valid "$region" || return 1
+  # The host names the region, so a query that repeats it must agree and a link
+  # that omits it loses nothing. A query naming another region is still refused
+  # rather than silently resolved to the host's.
+  [ -z "$query" ] || [ "$query" = "$region" ] || return 1
+  fm_pr_codecommit_repo_valid "$repo" || return 1
+  FM_PR_PROVIDER=codecommit
+  FM_PR_URL="https://$host/codesuite/codecommit/repositories/$repo/pull-requests/$number?region=$region"
+  FM_PR_HOST=$host
+  FM_PR_PATH=$repo
+  FM_PR_NUMBER=$number
+  # Consumed by bin/fm-pr-merge.sh and bin/fm-pr-check.sh, which pass the region
+  # to the AWS CLI.
+  # shellcheck disable=SC2034
+  FM_PR_REGION=$region
 }
 
 fm_pr_head_valid() {
@@ -352,17 +499,38 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
-# Sidecar layout: provider, url, host, path, number, one per line. A sidecar
-# written before the provider tag existed has a URL on its first line and one
-# line fewer, so it fails both the field count and the provider comparison and
-# is refused rather than misread as a provider-tagged record.
+# The one rule tying a sidecar credential line to its provider: codecommit must
+# carry a usable AWS profile, and every other provider must carry none at all.
+# Stating it once keeps the sidecar reader and the sidecar writer from drifting.
+# bin/fm-pr-poll.sh cannot call this helper: it is byte-static and sources
+# nothing, so it necessarily carries its own inline copy of this same rule.
+# Changing this function is therefore not sufficient - the copy in
+# bin/fm-pr-poll.sh must change in step, and a poll that keeps the old rule is
+# only recoverable by re-arming it.
+fm_pr_credential_valid_for_provider() {  # <provider> <credential>
+  local provider=${1-} credential=${2-}
+  if [ "$provider" = codecommit ]; then
+    fm_pr_aws_profile_valid "$credential"
+  else
+    [ -z "$credential" ]
+  fi
+}
+
+# Sidecar layout: provider, url, host, path, number, one per line, then the
+# optional credential line a codecommit record carries and no other provider
+# may. A sidecar written before the provider tag existed has a URL on its first
+# line and one line fewer, so it fails both the field count and the provider
+# comparison and is refused rather than misread as a provider-tagged record.
+# A github or gitlab sidecar written before CodeCommit existed still has
+# exactly five lines and is read unchanged.
 fm_pr_poll_data_parse() {
-  local file=$1 provider url host path number
+  local file=$1 provider url host path number credential=
   FM_PR_DATA_PROVIDER=
   FM_PR_DATA_URL=
   FM_PR_DATA_HOST=
   FM_PR_DATA_PATH=
   FM_PR_DATA_NUMBER=
+  FM_PR_DATA_CREDENTIAL=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 8< "$file" || return 1
   IFS= read -r provider <&8 || { exec 8<&-; return 1; }
@@ -370,9 +538,11 @@ fm_pr_poll_data_parse() {
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then
-    exec 8<&-
-    return 1
+  if IFS= read -r credential <&8; then
+    if IFS= read -r _extra <&8; then
+      exec 8<&-
+      return 1
+    fi
   fi
   exec 8<&-
   fm_pr_url_parse "$url" || return 1
@@ -380,11 +550,13 @@ fm_pr_poll_data_parse() {
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  fm_pr_credential_valid_for_provider "$provider" "$credential" || return 1
   FM_PR_DATA_PROVIDER=$FM_PR_PROVIDER
   FM_PR_DATA_URL=$FM_PR_URL
   FM_PR_DATA_HOST=$FM_PR_HOST
   FM_PR_DATA_PATH=$FM_PR_PATH
   FM_PR_DATA_NUMBER=$FM_PR_NUMBER
+  FM_PR_DATA_CREDENTIAL=$credential
 }
 
 # Registration layout: version tag, task id, then the same provider-tagged
@@ -472,14 +644,31 @@ fm_pr_poll_revoke_final() {
   return "$failed"
 }
 
+# An empty credential writes no sixth line at all, so a github or gitlab
+# sidecar stays byte-identical to one written before CodeCommit existed and no
+# already-published sidecar is invalidated. That is a narrower claim than
+# needing no re-arming at all: fm_pr_poll_artifacts_valid compares every armed
+# check against the shipped bin/fm-pr-poll.sh byte for byte, so any release
+# that edits the poll source invalidates every poll armed before it, on every
+# provider, until bin/fm-pr-check.sh arms it again.
+fm_pr_poll_write_data() {  # <file> <provider> <url> <host> <path> <number> <credential>
+  local file=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 credential=$7
+  if [ -z "$credential" ]; then
+    printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$file"
+  else
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" "$credential" > "$file"
+  fi
+}
+
 fm_pr_poll_prepare() {
-  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8 credential=${9-}
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  fm_pr_credential_valid_for_provider "$provider" "$credential" || return 1
   [ -f "$template" ] || return 1
 
   [ ! -L "$state" ] || return 1
@@ -495,6 +684,7 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_HOST=$host
   FM_PR_POLL_EXPECT_PATH=$path
   FM_PR_POLL_EXPECT_NUMBER=$number
+  FM_PR_POLL_EXPECT_CREDENTIAL=$credential
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
@@ -508,7 +698,7 @@ fm_pr_poll_prepare() {
     return 1
   }
 
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP" \
+  if ! fm_pr_poll_write_data "$FM_PR_POLL_DATA_TMP" "$provider" "$url" "$host" "$path" "$number" "$credential" \
     || ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_TMP" \
@@ -517,6 +707,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_HOST" != "$host" ] \
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
+    || [ "$FM_PR_DATA_CREDENTIAL" != "$credential" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
@@ -566,7 +757,8 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_DATA_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
     || [ "$FM_PR_DATA_HOST" != "$FM_PR_POLL_EXPECT_HOST" ] \
     || [ "$FM_PR_DATA_PATH" != "$FM_PR_POLL_EXPECT_PATH" ] \
-    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ]; then
+    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ] \
+    || [ "$FM_PR_DATA_CREDENTIAL" != "$FM_PR_POLL_EXPECT_CREDENTIAL" ]; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -753,6 +945,9 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  # Consumed by bin/fm-watch.sh, which passes it to the validated poll.
+  # shellcheck disable=SC2034
+  FM_PR_POLL_SNAPSHOT_CREDENTIAL=$FM_PR_DATA_CREDENTIAL
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY

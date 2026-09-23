@@ -393,6 +393,90 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+## Fleet browser access
+
+Verified 2026-09-08 on Claude Code 2.1.263, chrome-devtools-axi 0.1.34 and Chrome 152.0.7977.82 (macOS).
+
+### Claude Code's Chrome integration is not on by default, and the default is not uniform
+
+`claude --chrome` and `claude --no-chrome` control whether a launched agent has the `mcp__claude-in-chrome__*` tools.
+The bare default is neither fixed nor uniform, which is why `bin/fm-spawn.sh` always emits one direction rather than relying on it.
+Measured by asking a launched agent to count its own tools whose names begin `mcp__claude-in-chrome`:
+
+| Launch | Print mode (`-p`) | Interactive (real tmux pane) |
+|---|---|---|
+| bare | 0 | 22 |
+| `--no-chrome` | 0 | 0 |
+| `--chrome` | 22 | 22 |
+| `--chrome --strict-mcp-config` | 0 | not run |
+
+```sh
+echo 'Reply with exactly: COUNT=<number of tools available to you whose name begins with mcp__claude-in-chrome>. No other text.' | claude -p --chrome
+```
+
+```
+COUNT=22
+```
+
+Interactive mode was measured separately rather than inferred from print mode, because this repo already carries one flag (`--prompt-suggestions`) that works in print mode and not interactively.
+The `--strict-mcp-config` row shows the integration arrives as an ordinary MCP server rather than a built-in, which is also why it is absent from `claude mcp list`.
+
+The interactive default being on is what made this a real gap: a crewmate launched with no flag inherited the captain's extension and competed with his own session for it.
+
+### Sealed compartments carry a signed-in session without carrying the whole profile
+
+A compartment is a Chrome browser context inside the one work browser.
+`bin/fm-work-browser-cdp.mjs` creates it, hands it only the cookies whose domain is on the task's allowlist, and disposes it whole at teardown.
+Measured on a throwaway work browser with two seeded site logins, handing over one:
+
+```
+shared jar : site-a.example, site-b.example
+compartment: site-a.example
+```
+
+A cookie added to the shared jar *after* sealing did not reach the compartment, so a later sign-in cannot widen an existing worker's blast radius:
+
+```
+DEFAULT  jar: defaultonly,sharedlogin
+COMPARTMENT : sharedlogin
+```
+
+`Target.disposeBrowserContext` removed the context and its tab together (4 page targets to 3), and a repeated close is a no-op, so an interrupted teardown can retry.
+
+### The seal holds through the fleet's own tool, and `newpage` breaks it
+
+This is the link the strategy investigation did not test: it proved `chrome-devtools-axi` attaches to the work browser, not that a worker driving a compartment stays inside it.
+With `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointed at the work browser, `selectpage` onto the compartment's tab followed by `open` navigates that tab in place and stays sealed:
+
+```
+--- COMPARTMENT (page 2) ---
+result: "\"sharedlogin=DEFAULT-JAR\""
+--- DEFAULT (page 1) ---
+result: "\"sharedlogin=DEFAULT-JAR; defaultonly=SHARED-ONLY-MUST-NOT-LEAK\""
+```
+
+`newpage` does NOT stay sealed.
+It creates the tab in the browser's default context and leaves the session with no page selected:
+
+```
+93301EB1 ctx=DE0F5FE9 https://example.com/   <- default context
+F685BD2A ctx=DE0F5FE9 https://example.com/   <- newpage landed here
+B9C2A702 ctx=770B9D32 https://example.com/   <- the compartment
+```
+
+That is why the generated brief forbids `newpage` outright and tells a worker to navigate with `open` instead.
+
+### Refreshing this evidence
+
+`bash tests/fm-work-browser-live-e2e.test.sh` drives a real throwaway Chrome and re-checks the compartment properties, the idempotent close, and the refusal of port 9222.
+It spends no model tokens and runs by default wherever Chrome, `node` and `curl` are installed.
+The Claude Code flag matrix above is refreshed by rerunning the two commands in this section after a Claude Code upgrade.
+
+### Not established here
+
+- Cookies are carried into a compartment; `localStorage` is not, so a site keeping its login in the page presents as signed out inside the compartment.
+- No session value was ever read from the captain's personal Chrome (PID 46710, port 9222); it was unchanged before and after, and every browser used here was a throwaway on another port.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
@@ -1186,20 +1270,21 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 ```
 
-Observed guarantees on 2026-07-30 against Herdr 0.7.5 protocol 17:
+Observed guarantees on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```text
 ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
 ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
-ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
+ok - real herdr E2E: a presentation-enabled worker whose launcher sits at its project's checkout stays in that exact workspace without a journal or focus change
 ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
 ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
-ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
+ok - real herdr E2E: with a duplicated home label, a worker is never grouped under a Firstmate home space; it stays in the launcher's exact workspace and the sibling is untouched
 ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
 ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
 ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
 ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
 ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
 ```
 
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
@@ -1216,64 +1301,52 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
-The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
+The per-project grouping suite ran on 2026-09-14 against Herdr 0.8.2 protocol 20 on macOS aarch64:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-presentation-e2e.test.sh
 ```
 
-Observed guarantees included:
+Observed guarantees:
 
 ```text
-ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
-ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
-ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
-ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
-ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
-ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
+ok - real Herdr lab: an opted-out spawn stays flat in its launching space with zero grouping calls
+ok - real Herdr lab: a home that configured nothing is grouped under its project by default on herdr 0.8.2
+ok - real Herdr lab: a fresh worker is grouped as a plain-labeled linked child under one project parent with an exact version 4 binding and no focus drift
+ok - real Herdr lab: Treehouse commands and metadata shape are identical to the flat path except for endpoint IDs and spawn incarnation
+ok - real Herdr lab: a second worker on the same project reuses the one project parent
+ok - real Herdr lab: concurrent workers on one project end under exactly one parent without focus drift
+ok - real Herdr lab: bounded lock contention warns and stays flat without a journal, grouping calls, or focus drift
+ok - real Herdr lab: exact task-pane teardown removes only the child space, retires its journal, and leaves the project parent
+ok - real Herdr lab: concurrent grouped teardowns are serialized and leave the parent and active workspace/tab unchanged
+ok - real Herdr lab: a secondmate agent stays in its home workspace ungrouped, and the presentation setting inherits into secondmate homes
+ok - real Herdr lab: primary and secondmate homes each group their workers under that project's one parent with home-local journals
+ok - real Herdr lab: a launcher sitting at the project's own checkout is refused grouping and its worker stays flat with no residue
+ok - real Herdr lab: multi-home exact-pane teardowns keep parents and home spaces without workspace close authority
+ok - real Herdr lab: legacy presentation labels and flat secondmate tabs are left unmigrated
+ok - real Herdr lab: a re-dispatch whose project group was closed retires the stale binding and groups the new worker afresh
+ok - real Herdr lab: after a session restart a grouped worker is never reclaimed in place and its re-dispatch falls back flat
+ok - real Herdr lab: missing, renamed, and duplicate legacy titles trigger zero mutation calls, and live duplicate risk refuses launch
+ok - real Herdr lab: grouped journals correlate only by worktree membership, with zero mutation calls, and a live agent there refuses launch
+ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
 ```
 
-The suite also covers lost or failed move responses, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
+In-place reclaim of a retired version 2 binding is no longer exercised by that suite, because no production path writes one; `tests/fm-backend-herdr.test.sh` pins it with hand-written records.
 
-The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
+The Herdr behavior that grouping relies on was observed in guarded `fm-lab-` sessions on 2026-09-14 against Herdr 0.8.2 protocol 20, with every call made as `bin/fm-herdr-lab.sh run <lab-session> <arguments>`:
 
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
+- `workspace create --cwd <linked-worktree>` reported `"worktree":null` in `workspace list`, so a space created that way stays a top-level row.
+- `worktree open --cwd <main-checkout> --path <linked-worktree> --label <task> --no-focus` returned `"already_open":false` with `"is_linked_worktree":true` for the child, created a parent reporting `"is_linked_worktree":false` labeled with the repository name when none was open, and reused the one parent for later worktrees of the same repository, including a parent that had been renamed.
+- A space created with `workspace create --cwd <main-checkout>` became that project's parent the first time a worktree of the repository was opened.
+- Opening an already-open path returned `"already_open":true` and relabeled that existing space.
+- `worktree open --cwd <linked-worktree>` failed with `linked_worktree_source`, and `worktree open --workspace <non-git-space>` failed with `not_git_worktree`.
+- `pane move <pane> --new-tab --workspace <child> --label fm-<id> --no-focus` returned a new pane id with `previous_pane_id` naming the moved pane, and a background process started in that pane before the move was still running afterward.
+- Neither `worktree open --no-focus` nor `pane move --no-focus` changed the focused workspace or its active tab.
+- `workspace close <parent>` removed every space in that repository's group and ended the processes in their panes, while another repository's group, every worktree directory, and every branch remained.
+- Closing a child space, by `workspace close <child>` or by closing its only pane, removed only that child.
 
-Observed restart-reclaim guarantees:
-
-```text
-ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
-ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
-ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
-```
-
-The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enables the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-Observed default and opt-out guarantees:
-
-```text
-ok - real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls
-ok - real Herdr lab: a home that configured nothing is projected by default
-ok - real Herdr lab: the primary presentation setting inherits into real secondmate homes
-ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
-```
-
-The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
-That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
-
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+The restored-shell session-start cleanup ran on 2026-09-14 against Herdr 0.8.2 protocol 20:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
@@ -1657,6 +1730,29 @@ The current guard uses one `enter` call for each entry, so no separate confirmat
 The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.sh` and the same live entry point: Bearings continues through a pending return catch-up, projects its posture as an action-free warning outside Captain's Call, and drops that warning after the gate clears, while an active away window still refuses.
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
+
+### Pane display metadata from two sources
+
+Verified on 2026-09-15 against Herdr 0.8.2 on macOS aarch64, in an isolated lab session.
+The pipeline-state marker rides `pane report-metadata --token` under its own `firstmate-state-marker` source rather than extending the model label's `--display-agent`, and this is the evidence for that choice.
+
+Refresh it with `bash tests/fm-backend-herdr-smoke.test.sh`, which exercises the real binary through `bin/backends/herdr.sh`'s own functions and skips cleanly where Herdr is not installed.
+
+```text
+1 label only:      {"display_agent":"claude · opus5 · xhi","tokens":null}
+2 marker set:      {"display_agent":"claude · opus5 · xhi","tokens":{"st":"◆cx"}}
+3 marker changed:  {"display_agent":"claude · opus5 · xhi","tokens":{"st":"◈fx"}}
+4 marker cleared:  {"display_agent":"claude · opus5 · xhi","tokens":null}
+5 cleared again:   {"display_agent":"claude · opus5 · xhi","tokens":null}  rc=0
+```
+
+Observed guarantees: one pane carries a `display_agent` from one metadata source and a `token` from a different source at the same time; changing the token in place leaves the display agent untouched; `--clear-token` removes only the token; and clearing an already-clear token succeeds, which is what a finished run does on most polls.
+That last property is why a lane can stop claiming it is in review without the row losing its model label.
+A second writer of `--display-agent` would instead have had to re-send the whole label on every state change, so the two-source shape is what keeps the label safe.
+
+What this evidence does NOT cover: where Herdr draws a pane token in its sidebar, and how wide those glyphs render.
+The lab viewer attaches a real foreground client but drains its pty without capturing it (`bin/fm-herdr-lab-viewer.py`), so no rendered screen can be read back here.
+The one shipped default, `rvx` for the review, is therefore plain ASCII, whose width does not depend on how a terminal renders symbols, and every marker is overridable in `config/model-labels.toml` without a code change.
 
 ## Zellij
 

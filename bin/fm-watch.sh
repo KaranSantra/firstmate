@@ -709,6 +709,86 @@ signal_turnend_panes_churned() {  # <file> ...
   return 0
 }
 
+# Worker endpoints found gone during this poll's pane-staleness pass. A capture
+# failure alone proves nothing, so only the adapter's structural `missing`
+# verdict counts, and only for Herdr, where closing a project's parent row
+# closes every worker space grouped under it at once and nothing else wakes
+# firstmate for a quiet worker whose terminal vanished. Each lost endpoint is
+# surfaced once; .endpoint-lost-<key> remembers the endpoint already reported.
+ENDPOINTS_LOST=()
+
+endpoint_lost_note() {  # <window> <task>
+  local w=$1 task=$2 marker
+  [ -n "$task" ] || return 0
+  [ "$(window_kind "$w")" != secondmate ] || return 0
+  [ "$(window_backend "$w")" = herdr ] || return 0
+  marker="$STATE/.endpoint-lost-$(window_key "$w")"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$w" ] || return 0
+  [ "$(fm_backend_agent_state herdr "$w" 2>/dev/null || true)" = missing ] || return 0
+  ENDPOINTS_LOST+=("$w")
+}
+
+# One lost worker's recovery facts: its project, whether its worktree holds
+# uncommitted changes or commits no remote has, and whether the Herdr project
+# parent space its exact grouping binding recorded is gone too.
+endpoint_lost_detail() {  # <task>
+  local task=$1 meta project wt work ahead journal parent_state group=
+  meta="$STATE/$task.meta"
+  project=$(fm_meta_get "$meta" project 2>/dev/null || true)
+  wt=$(fm_meta_get "$meta" worktree 2>/dev/null || true)
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null || true)" ]; then
+      work="uncommitted changes in $wt"
+    else
+      work="no uncommitted changes in $wt"
+    fi
+    ahead=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || true)
+    case "$ahead" in
+      ''|*[!0-9]*) work="$work, unpushed commits unreadable" ;;
+      0) ;;
+      *) work="$work, $ahead commits on no remote" ;;
+    esac
+  else
+    work="its recorded worktree '${wt:-none}' is missing"
+  fi
+  fm_backend_source herdr 2>/dev/null || { printf '%s' "${project:+project $project; }$work"; return 0; }
+  journal="$STATE/$task$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"
+  if [ -f "$journal" ] \
+     && fm_backend_herdr_projection_journal_snapshot "$journal" "$task" \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 4 ]; then
+    parent_state=$(fm_backend_herdr_workspace_presence_state \
+      "$FM_BACKEND_HERDR_JOURNAL_SESSION" "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" 2>/dev/null || true)
+    [ "$parent_state" != dead ] \
+      || group="; its Herdr project space '$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL' is closed too"
+  fi
+  printf '%s' "${project:+project $project; }$work$group"
+}
+
+surface_endpoints_lost() {
+  local w task summary='' reason
+  for w in "${ENDPOINTS_LOST[@]}"; do
+    task=$(window_to_task "$w" "$STATE")
+    summary="${summary:+$summary | }$task: $(endpoint_lost_detail "$task")"
+  done
+  for w in "${ENDPOINTS_LOST[@]}"; do
+    task=$(window_to_task "$w" "$STATE")
+    reason="stale: $w (worker terminal gone: $task's endpoint no longer exists, so its agent is not running; nothing on disk was removed - recover it. Workers lost together: $summary)"
+    fm_wake_append stale "$w" "$reason" || exit 1
+    printf '%s' "$w" > "$STATE/.endpoint-lost-$(window_key "$w")" || exit 1
+  done
+  wake "$reason"
+}
+
+refresh_state_markers_detached() {
+  local w task
+  while IFS= read -r w; do
+    task=$(window_to_task "$w" "$STATE")
+    [ -n "$task" ] || continue
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-state-marker.sh" update "$task" >/dev/null &
+  done < <(recorded_windows)
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -2398,6 +2478,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
+          credential=$FM_PR_POLL_SNAPSHOT_CREDENTIAL
           PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
           fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
           if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
@@ -2406,7 +2487,7 @@ while :; do
             continue
           fi
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" "$credential" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -2494,6 +2575,7 @@ EOF
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  refresh_state_markers_detached
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -2619,6 +2701,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
+  ENDPOINTS_LOST=()
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -2640,7 +2723,13 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_lost_note "$w" "$task"
+      continue
+    fi
+    # A readable endpoint is not lost, so a report marker for this key belongs to
+    # an earlier endpoint and must not suppress a later loss that reuses its id.
+    [ ! -e "$STATE/.endpoint-lost-$key" ] || rm -f "$STATE/.endpoint-lost-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2835,6 +2924,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  [ "${#ENDPOINTS_LOST[@]}" -eq 0 ] || surface_endpoints_lost
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

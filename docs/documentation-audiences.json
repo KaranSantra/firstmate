@@ -473,6 +473,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/codecommit-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
