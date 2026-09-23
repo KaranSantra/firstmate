@@ -53,6 +53,9 @@ make_fake_root() {
   # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
   # test cannot depend on or mutate a host tmux server.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  # Teardown sources the browser cleanup owner even when this fixture has no
+  # browser grant to release.
+  ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
@@ -159,6 +162,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-browser-lib.sh" "$fake/bin/fm-browser-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
