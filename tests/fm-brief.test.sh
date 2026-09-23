@@ -1131,9 +1131,9 @@ test_chrome_flag_selects_the_browser_paragraph() {
     assert_grep "NO browser at all" "$plain" \
       "$kind default brief did not tell the worker the browser is absent"
     # The escape hatch only belongs in the variant that has no browser.
-    assert_grep "blocked: needs a browser" "$plain" \
+    assert_grep "blocked [at=<epoch>]: needs a browser" "$plain" \
       "$kind default brief gave the worker no way to ask for a browser"
-    if grep -q "blocked: needs a browser" "$granted"; then
+    if grep -qF "blocked [at=<epoch>]: needs a browser" "$granted"; then
       fail "$kind --chrome brief told a worker that already has a browser to ask for one"
     fi
     # The two variants must actually differ, so neither can go quietly vacuous.
