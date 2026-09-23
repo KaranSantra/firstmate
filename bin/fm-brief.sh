@@ -426,11 +426,11 @@ if [ -n "$BROWSER" ]; then
    deletes, or changes an account setting stops and asks. Never sign in or out of anything: a
    logout would end the session for everyone using that browser.
    If your site presents as signed out, do NOT try to sign in - append
-   \`blocked: work browser is not signed in to <site>\` and stop."
+   \`blocked [at=<epoch>]: work browser is not signed in to <site>\` and stop."
   else
     BROWSER_WHICH="   You have your own throwaway browser. It carries NO logins, so any page behind a
    sign-in will show you a signed-out view - that result is meaningless as evidence, and if the
-   task needs a signed-in session, append \`blocked: needs the signed-in work browser\` and stop
+   task needs a signed-in session, append \`blocked [at=<epoch>]: needs the signed-in work browser\` and stop
    rather than reporting what a logged-out browser showed."
   fi
   BROWSER_RULE="   Drive the browser with \`chrome-devtools-axi\`. Never the \`mcp__claude-in-chrome__*\` tools:
@@ -464,7 +464,7 @@ else
    tools nor a \`chrome-devtools-axi\` browser of your own is available to you. Never reach for
    either: the extension drives the captain's own browser and is reserved for him, and an
    unrequested browser costs about 0.65GB on a machine that is already short of memory.
-   If this task genuinely needs a browser, append \`blocked: needs a browser\` and stop, saying
+   If this task genuinely needs a browser, append \`blocked [at=<epoch>]: needs a browser\` and stop, saying
    whether it needs a signed-in session; firstmate relaunches you with the right one.
    Open a browser only when the task needs real application behavior -
    never to preview or check your own HTML output, and never start a web server to view your own
