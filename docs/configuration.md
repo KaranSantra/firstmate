@@ -469,7 +469,7 @@ The lane's own row is therefore the only place it can be shown, and `bin/fm-stat
 Out of the box only the review is marked, as `rvx` - `rv` for review and `x` for the Codex reviewer - because which lane is with the reviewer is the thing worth seeing; change that entry if the configured reviewer changes.
 Every other state shows nothing until `[states.glyphs]` gives it a marker, and the same table overrides `rvx` without a code change.
 Each marker is at most three characters, letters allowed, because the row is horizontally tight.
-Its keys are the pipeline's own step names - `intent`, `review`, `test`, `lint`, `document`, `push`, `pr`, and `ci` - plus `fix` for an auto-fix round and `decision` for a lane held for an answer.
+Its keys are the pipeline's own step names - `intent`, `review`, `test`, `lint`, `document`, `push`, `pr`, and `ci` - plus `fix` for an auto-fix round and `decision` for a lane parked at a gate.
 `bin/fm-model-labels.sh check` warns on a key outside that set, so a typo is caught rather than silently ignored, and `bin/fm-model-labels.sh marker <key>` prints the marker any key currently resolves to.
 The `rvx` default ships with the script, so the review marker works before the file exists; a lookup that cannot be parsed, or that sets a marker longer than the limit, leaves the existing row and marker record unchanged and says why rather than quietly showing the wrong one.
 
