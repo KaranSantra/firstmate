@@ -26,7 +26,9 @@ make_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
-  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
+  # chrome-devtools-axi is faked because bin/fm-spawn.sh refuses --browser
+  # without it on PATH, and the CI runner does not install it.
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake" chrome-devtools-axi)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -34,7 +36,7 @@ make_case() {
 }
 
 read_case() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
 }
