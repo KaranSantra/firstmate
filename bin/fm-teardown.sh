@@ -276,6 +276,23 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - stop the task's browser session. A worker granted a browser with
+#     bin/fm-spawn.sh's --browser leaves a full Chrome plus its Node control
+#     plane resident - measured at roughly 680MB - for as long as the machine
+#     is up unless the session is explicitly stopped; every `open` without a
+#     matching `stop` leaks one, and a crashed worker orphans one that nothing
+#     else ever reaps (12.3GB of exactly this was measured on the captain's
+#     machine in data/fm-chrome-devtools-axi-review/report.md). The stop is
+#     driven from the task record rather than from a live worker, so it still
+#     runs when the worker is already gone, and it targets only this task's own
+#     session name and port so a sibling lane's browser is never touched.
+#     Idempotent: stopping a session that was never started is a no-op. Best
+#     effort like Fix 3 - a stop failure never blocks the teardown - but it is
+#     reported so a leak is visible rather than silent. A `work` grant also holds
+#     a sealed compartment inside the shared work browser; stopping the worker's
+#     own bridge does not dispose that, so the recorded browser_context= is
+#     closed too, or it lingers holding that task's cookies with nothing left to
+#     name it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -293,6 +310,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-browser-lib.sh
+. "$SCRIPT_DIR/fm-browser-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -3461,6 +3480,22 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
+if [ "$KIND" != secondmate ]; then
+  # Fix 4 (see script header): stop this task's browser before the record that
+  # names it is removed, or nothing is left that could ever identify the leak.
+  TEARDOWN_BROWSER=$(meta_value "$META" browser)
+  if [ -n "$TEARDOWN_BROWSER" ]; then
+    fm_browser_stop_session "$ID" "$(meta_value "$META" browser_port)" || true
+    # A work grant also holds a compartment inside the shared work browser.
+    # Stopping the worker's own bridge does not dispose it, so it would sit
+    # there holding this task's cookies with nothing left to identify it.
+    TEARDOWN_BROWSER_CTX=$(meta_value "$META" browser_context)
+    if [ -n "$TEARDOWN_BROWSER_CTX" ]; then
+      "$SCRIPT_DIR/fm-work-browser.sh" compartment-close "$TEARDOWN_BROWSER_CTX" >/dev/null 2>&1 \
+        || echo "browser-cleanup: could not dispose browser compartment $TEARDOWN_BROWSER_CTX for $ID; it may still hold that task's session" >&2
+    fi
+  fi
+fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
@@ -3695,6 +3730,15 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+if [ -d "$STATE" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-state-marker.sh" retire "$ID" >/dev/null 2>&1 || {
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID's endpoint, local copy, and task record are cleaned up, but its sidebar marker record could not be retired" >&2
+    exit 1
+  }
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
