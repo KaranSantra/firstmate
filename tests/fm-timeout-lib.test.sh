@@ -109,7 +109,9 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      # The subshell's own pid, read as a child's parent because bash 3.2 has
+      # no BASHPID.
+      sh -c 'echo "$PPID"' > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +213,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      /bin/sh -c "echo \"\$PPID\"" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -228,6 +230,32 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
     sleep 0.02
   done
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
+# The owner check reads BASHPID, which bash 3.2 (stock /bin/bash on macOS) does
+# not have, and callers run under set -u. A bash without it keeps the calling
+# shell as the owner instead of failing the bounded call. Stock /bin/bash is
+# used when it lacks BASHPID; any other bash has it unset first, so the case
+# exercises the same path everywhere.
+test_the_owner_check_runs_under_set_u_without_bashpid() {
+  local shell out rc
+  shell=bash
+  if [ -x /bin/bash ] && /bin/bash -c '[ -z "${BASHPID+set}" ]'; then
+    shell=/bin/bash
+  fi
+  rc=0
+  # shellcheck disable=SC2016
+  out=$("$shell" -c '
+    set -u
+    unset BASHPID 2>/dev/null || true
+    [ -z "${BASHPID+set}" ] || { echo "BASHPID is still set"; exit 90; }
+    . "$1/bin/fm-timeout-lib.sh"
+    PATH=$2 fm_exec_timed 5 1 bash -c "echo bounded-ran"
+  ' _ "$ROOT" "$PERL_ONLY" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed failed under set -u without BASHPID (rc=$rc): $out"
+  assert_not_contains "$out" "unbound variable" "fm_exec_timed read an unset BASHPID under set -u"
+  [ "$out" = bounded-ran ] || fail "the bounded command did not run without BASHPID: $out"
+  pass "fm_exec_timed runs under set -u on a bash without BASHPID"
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a
@@ -337,6 +365,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_the_owner_check_runs_under_set_u_without_bashpid
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
