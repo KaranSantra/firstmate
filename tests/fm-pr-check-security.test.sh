@@ -3065,7 +3065,7 @@ break_codecommit_aws() {
       cat > "$dir/fakebin/aws" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$dir/aws.log"
-echo 'Error loading SSO Token: Token for pa-team.awsapps.com does not exist' >&2
+echo 'Error loading SSO Token: Token for example.awsapps.com does not exist' >&2
 exit 255
 SH
       ;;
