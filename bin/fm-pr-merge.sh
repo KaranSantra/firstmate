@@ -24,7 +24,9 @@
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
 # Unbound requirements match by name. A bound requirement reported as a check
 # run also needs a matching producer in the check-runs read at the verified
-# head, while one reported as a commit status matches by name, because the
+# head, and that producer's own runs are judged green on their own, so another
+# app's newer same-named green run cannot supersede a failed bound run. One
+# reported as a commit status matches by name, because the
 # status carries no app id to compare. Status-creator app binding is not verified
 # here, so an attended --attended-override -- --admin merge can bypass that
 # protection without a missing-check waiver when a same-named status reported.
@@ -679,7 +681,8 @@ FIELDS
 # CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
 # mergeable.
 #
-# Supersession applies only among check runs with the same reported name. A
+# Supersession applies only among check runs with the same reported name and,
+# when the entry carries one, the same producer app id. A
 # name is dropped from the red set only when every non-green run is COMPLETED,
 # has a whole-second UTC startedAt, and started strictly before a green run.
 # Status contexts are never grouped or superseded, and every non-green one is
@@ -705,11 +708,12 @@ github_checks_not_green() {
             {
               kind: "check_run",
               name: (.name // ""),
+              app: .appId,
               completed: (.status == "COMPLETED"),
               ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
               at: (.startedAt | settled_at)
             }
-            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
+            | . + {group: (if .name == "" then ["", $i] else [.name, .app] end)}
           else
             {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
           end
@@ -819,7 +823,7 @@ github_required_checks_missing() {
             (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
           elif .__typename == "CheckRun" then
             .name == $requirement.context
-            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+            and any($producers[]; .name == $requirement.context and .appId == $requirement.app_id)
           else
             .context == $requirement.context
           end) | not)
@@ -830,7 +834,7 @@ github_required_checks_missing() {
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line red bound_red name covered missing unreported producers runs
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -898,6 +902,39 @@ FIELDS
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
 
+  unreported=''
+  if ! github_read_required_contexts "$base"; then
+    while IFS= read -r line; do
+      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
+"
+    done <<EOF
+$FM_PR_GITHUB_REQUIRED_ERROR
+EOF
+  fi
+  producers='[]'
+  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
+      || [ -z "$runs" ] \
+      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" --argjson required "$FM_PR_GITHUB_REQUIRED" '
+        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+               and (.status | type) == "string"
+               and (.conclusion == null or (.conclusion | type) == "string")
+            then {__typename: "CheckRun", name, appId: .app.id, status: (.status | ascii_upcase),
+                  conclusion: (.conclusion | if . == null then null else ascii_upcase end),
+                  startedAt: .started_at}
+            else error("invalid check producer") end
+          | . as $run
+          | select(any($required[]; .context == $run.name and .app_id == $run.appId)) ]' 2>/dev/null) \
+      || ! bound_red=$(github_checks_not_green "{\"statusCheckRollup\":$producers}"); then
+      producers='[]'
+      refusals="$refusals  - required check producers at head $live_head could not be read
+"
+    else
+      red=$(printf '%s\n%s\n' "$red" "$bound_red" | awk 'NF && !seen[$0]++')
+    fi
+  fi
+
   uncovered=''
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -916,28 +953,6 @@ FIELDS
 $red
 EOF
 
-  unreported=''
-  if ! github_read_required_contexts "$base"; then
-    while IFS= read -r line; do
-      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
-"
-    done <<EOF
-$FM_PR_GITHUB_REQUIRED_ERROR
-EOF
-  fi
-  producers='[]'
-  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
-    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
-      || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
-        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
-          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
-      producers='[]'
-      refusals="$refusals  - required check producers at head $live_head could not be read
-"
-    fi
-  fi
   if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
     refusals="$refusals  - the GitHub pull request check rollup could not be read
 "

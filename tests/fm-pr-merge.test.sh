@@ -3785,12 +3785,12 @@ test_required_producer_identity() {
       fi
       app=42
       [ "$variant" != correct ] || app=15368
-      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s"}]}\n' \
+      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' \
         "$app" "$head" > "$case_dir/github-runs.json"
       case "$variant" in
         unreadable) rm "$case_dir/github-runs.json" ;;
         malformed) printf '{}' > "$case_dir/github-runs.json" ;;
-        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb"}]}' > "$case_dir/github-runs.json" ;;
+        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb","status":"completed","conclusion":"success"}]}' > "$case_dir/github-runs.json" ;;
       esac
       expected=1
       if [ "$variant" = waived ]; then
@@ -3814,6 +3814,55 @@ test_required_producer_identity() {
     done
   done
   pass "fm-pr-merge enforces required producer identity and named waivers"
+}
+
+# The rollup carries no producer app, so a failed run from the bound app must
+# not be superseded by another app's newer same-named green run; the bound
+# producer's own runs decide, and --allow-red still waives that exact name.
+test_bound_producer_red_not_superseded_by_foreign_green() {
+  local case_dir head kind variant
+  head=a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8
+  for kind in classic ruleset; do
+    for variant in foreign-green bound-green waived; do
+      case_dir=$(make_case "required-bound-red-$kind-$variant")
+      add_gh_mocks "$case_dir" "$head"
+      write_github_rollup_json "$case_dir" "$head" \
+        "$(check_run ci COMPLETED FAILURE 2026-09-01T10:00:00Z)" \
+        "$(check_run ci COMPLETED SUCCESS 2026-09-01T10:05:00Z)"
+      write_github_required "$case_dir" "$kind:ci"
+      if [ "$kind" = classic ]; then
+        jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+          "$case_dir/github-branch.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+      else
+        jq '.[1].parameters.required_status_checks[0].integration_id = 15368' \
+          "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
+      fi
+      if [ "$variant" = bound-green ]; then
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s","status":"completed","conclusion":"failure","started_at":"2026-09-01T10:00:00Z"},{"name":"ci","app":{"id":15368},"head_sha":"%s","status":"completed","conclusion":"success","started_at":"2026-09-01T10:05:00Z"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+      else
+        printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"%s","status":"completed","conclusion":"failure","started_at":"2026-09-01T10:00:00Z"},{"name":"ci","app":{"id":42},"head_sha":"%s","status":"completed","conclusion":"success","started_at":"2026-09-01T10:05:00Z"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+      fi
+      case "$variant" in
+        waived) run_required_case "$case_dir" 112 --attended-override --allow-red ci -- --admin ;;
+        *) run_required_case "$case_dir" 112 --attended-override -- --admin ;;
+      esac
+      if [ "$variant" = foreign-green ]; then
+        expect_code 1 "$RC" "bound-red-$kind: a failed bound run must refuse"
+        assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+          "bound-red-$kind: the failed bound run was not named"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" \
+          "bound-red-$kind: gh pr merge ran with the bound run failed"
+      else
+        expect_code 0 "$RC" "bound-red-$kind-$variant: must merge: $(cat "$case_dir/stderr")"
+        assert_grep 'pr merge' "$case_dir/gh.log" "bound-red-$kind-$variant: did not merge"
+      fi
+    done
+  done
+  pass "fm-pr-merge judges an app-bound required check by its own producer's runs"
 }
 
 # A commit status carries no app id to compare, so an app-bound required context
@@ -3841,7 +3890,7 @@ test_app_bound_required_status_context_matches_by_name() {
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' \
         "$head" > "$case_dir/github-runs.json"
       run_required_case "$case_dir" 111
       if [ "$variant" = reported ]; then
@@ -4204,5 +4253,6 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
+test_bound_producer_red_not_superseded_by_foreign_green
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
