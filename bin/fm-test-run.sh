@@ -183,16 +183,16 @@ MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
-# script is tests/fm-watch-triage.test.sh in the watcher-wake-lock family, at
-# about 434s alone and about 698s under CI load (the hint table below records
-# that loaded figure), and the slowest script in a runner-file changed selection
-# is tests/fm-calm-pi-extension.test.sh at 77s once its Chrome reap terminates.
-# 1500s keeps every measured script under the bound with roughly 2.1x headroom
-# over the slowest loaded measurement, and it stays under the 30-minute normal
-# CI tier so a wedged script fails here, with its output, before the job cap
-# cancels the lane. It is a guard, not a speed control: a HUNG script becomes a
-# bounded failure instead of an unbounded suite, which is the shape that
-# silently outruns a caller's invocation budget.
+# script is tests/fm-supervision-host.test.sh at about 928s under CI load (the
+# portable serial hint table below records that loaded figure), with
+# tests/fm-watch-triage.test.sh next at about 698s, and the slowest script in a
+# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
+# once its Chrome reap terminates. 1500s keeps every measured script under the
+# bound with roughly 1.6x headroom over the slowest loaded measurement, and it
+# stays under the 30-minute normal CI tier so a wedged script fails here, with
+# its output, before the job cap cancels the lane. It is a guard, not a speed
+# control: a HUNG script becomes a bounded failure instead of an unbounded
+# suite, which is the shape that silently outruns a caller's invocation budget.
 CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
