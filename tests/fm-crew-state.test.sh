@@ -1149,6 +1149,52 @@ test_parked_human_decision_comes_from_the_action_column() {
   pass "the parked human-decision component is derived from the findings table's action column"
 }
 
+test_parked_for_component_comes_from_the_runs_awaiting_agent_clock() {
+  local d out dur want dur_want n=0
+  # The run's own `awaiting_agent: parked <duration>` clock is what the watcher's
+  # parked-run wake measures against, so it must reach the verdict as a whole
+  # component, in seconds, for every duration shape the pipeline prints.
+  for dur_want in '2m10s=130' '1h2m3s=3723' '45s=45' '0s=0' '3h=10800' '1m0.5s=60'; do
+    dur=${dur_want%%=*}; want=${dur_want#*=}
+    n=$((n + 1))
+    reset_fakes
+    d=$(new_case "parked-for-$n")
+    make_repo_on_branch "$d/wt" "fm/feat-pf$n"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-pf$n.meta" "window=fm:fm-feat-pf$n" "worktree=$d/wt" "kind=ship"
+    printf 'paused: waiting for the run to return a gate or outcome\n' > "$d/state/feat-pf$n.status"
+    FM_FAKE_AXI_STATUS="$(run_parked "fm/feat-pf$n" | sed "s/parked 2m10s/parked $dur/")"
+    out=$(run_crew_state "$d" "feat-pf$n")
+    assert_contains "$out" "state: parked" "$dur: a run parked on its worker reports parked"
+    assert_contains "$out" " · parked-for: ${want}s" "$dur: the run's clock becomes parked-for: ${want}s"
+  done
+
+  # No clock, no component: a gate with no awaiting_agent line, and a duration
+  # this reader does not recognise, must not invent one.
+  reset_fakes
+  d=$(new_case parked-for-absent)
+  make_repo_on_branch "$d/wt" fm/feat-pfa
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pfa.meta" "window=fm:fm-feat-pfa" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-pfa.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_scalar_gate_running fm/feat-pfa)"
+  out=$(run_crew_state "$d" feat-pfa)
+  assert_contains "$out" "state: parked" "a gate with no awaiting_agent clock still reports parked"
+  assert_not_contains "$out" "parked-for:" "a gate with no awaiting_agent clock carries no parked-for component"
+
+  reset_fakes
+  d=$(new_case parked-for-garbled)
+  make_repo_on_branch "$d/wt" fm/feat-pfg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pfg.meta" "window=fm:fm-feat-pfg" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-pfg.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-pfg | sed 's/parked 2m10s/parked a while/')"
+  out=$(run_crew_state "$d" feat-pfg)
+  assert_contains "$out" "state: parked" "an unreadable duration still reports parked"
+  assert_not_contains "$out" "parked-for:" "an unreadable duration carries no parked-for component"
+  pass "the parked-for component is the run's own awaiting_agent clock in seconds, and absent without one"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -2499,7 +2545,25 @@ test_no_run_busy_pane() {
   assert_contains "$out" "state: working" "busy record -> working"
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
-  pass "no run + a busy semantic record reads working, attributed to its source"
+  # The run-only read the watcher's per-poll parked-run tick uses stops at the
+  # run: the same busy pane is no evidence it consumes, and it must not spend
+  # the pane read to find that out.
+  out=$(FM_CREW_STATE_RUN_ONLY=1 run_crew_state "$d" feat-h)
+  assert_contains "$out" "state: unknown" "a run-only read of a no-run crew reports unknown"
+  assert_contains "$out" "source: none" "a run-only read of a no-run crew has no source"
+  assert_not_contains "$out" "source: pane" "a run-only read never consults the pane"
+
+  reset_fakes
+  d=$(new_case run-only-parked)
+  make_repo_on_branch "$d/wt" fm/feat-ro
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ro.meta" "window=fm:fm-feat-ro" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for the run to return a gate or outcome\n' > "$d/state/feat-ro.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-ro)"
+  out=$(FM_CREW_STATE_RUN_ONLY=1 run_crew_state "$d" feat-ro)
+  assert_contains "$out" "state: parked" "a run-only read still reports a parked run"
+  assert_contains "$out" " · parked-for: 130s" "a run-only read still carries the parked clock"
+  pass "no run + a busy semantic record reads working, attributed to its source; a run-only read stops at the run"
 }
 
 # A launch pinned at the fm-spawn seed (no hook has posted yet) whose pane
@@ -5562,6 +5626,7 @@ test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
 test_parked_human_decision_comes_from_the_action_column
+test_parked_for_component_comes_from_the_runs_awaiting_agent_clock
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

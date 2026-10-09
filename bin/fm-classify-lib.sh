@@ -2473,6 +2473,13 @@ crew_is_paused() {  # <id>
 # crew_gate_awaits_human_decision below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 
+# The verdict component that carries how long the run itself reports it has
+# waited on its agent, in whole seconds (`parked-for: 440s` is rendered as the
+# prefix plus the number plus `s`). bin/fm-crew-state.sh mints it from the run's
+# own `awaiting_agent: parked <duration>` line and only on a parked run that
+# carries one; fm_parked_run_parse below is its only consumer.
+FM_PARKED_FOR_PREFIX='parked-for: '
+
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
 # is owed by a human rather than by the crewmate itself.
 #
@@ -2513,6 +2520,52 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# Read one fm-crew-state.sh verdict line for a run PARKED on its agent and set
+# the facts the watcher's parked-run tick reports. Returns 1 (and sets nothing
+# usable) unless the verdict is `state: parked` from `source: run-step` and
+# carries a `parked-for:` component, so only a run whose own record says it is
+# waiting on its agent can mint an episode: a gate with no awaiting_agent clock,
+# a working run, and every non-run source all read as not parked. Sets:
+#   FM_PARKED_SECS      whole seconds the run reports it has been parked
+#   FM_PARKED_STEP      the gate step, from `parked at <step>[: N finding(s)]`
+#   FM_PARKED_FINDINGS  the finding count, empty when the verdict names none
+#   FM_PARKED_RUN       the run id from the whole `run: <id>` component, or empty
+#   FM_PARKED_HUMAN     1 when the gate's answer is owed by a human, else empty
+# Components are compared whole, never searched for, for the same reason
+# crew_gate_awaits_human_decision compares them whole.
+# shellcheck disable=SC2034 # The FM_PARKED_* facts are consumed by bin/fm-watch.sh's parked_run_observe.
+fm_parked_run_parse() {  # <crew-state-line>
+  local line=$1 state src rest part detail
+  FM_PARKED_SECS='' FM_PARKED_STEP='' FM_PARKED_FINDINGS='' FM_PARKED_RUN='' FM_PARKED_HUMAN=''
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = parked ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      "$FM_PARKED_FOR_PREFIX"*[0-9]s)
+        detail=${part#"$FM_PARKED_FOR_PREFIX"}; detail=${detail%s}
+        case "$detail" in ''|*[!0-9]*) ;; *) FM_PARKED_SECS=$((10#$detail)) ;; esac ;;
+      "run: "?*) detail=${part#run: }
+        case "$detail" in *[[:space:]]*) ;; *) FM_PARKED_RUN=$detail ;; esac ;;
+      "$FM_GATE_HUMAN_DECISION") FM_PARKED_HUMAN=1 ;;
+      "parked at "*)
+        detail=${part#parked at }
+        case "$detail" in
+          *": "*" finding(s)")
+            FM_PARKED_STEP=${detail%%: *}
+            detail=${detail#*: }; FM_PARKED_FINDINGS=${detail%% *} ;;
+          *) FM_PARKED_STEP=$detail ;;
+        esac ;;
+    esac
+  done
+  [ -n "$FM_PARKED_SECS" ] && [ -n "$FM_PARKED_STEP" ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

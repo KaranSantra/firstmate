@@ -1604,6 +1604,13 @@ handle_wake() {  # <reason> <state>
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;
+              esac
+              # A run parked on its worker (bin/fm-watch.sh's parked_run_tick) is
+              # escalated whatever the task's declared wait says, because the
+              # declaration is exactly what hid it. The watcher already left out
+              # a verified captain-held transfer and a gate whose decision is open.
+              case "$stale_detail" in
+                task\ *:\ no-mistakes\ run\ parked\ on\ worker\ *) decision="escalate|${reason#stale: }" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;

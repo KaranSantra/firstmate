@@ -975,6 +975,26 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+test_handle_wake_escalates_a_run_parked_on_its_worker_under_a_declared_pause() {
+  local dir state win reason out
+  dir=$(make_supercase handle-parked-run)
+  state="$dir/state"
+  win="sess:fm-parked-w11"
+  reason="stale: $win (task parked-w11: no-mistakes run parked on worker 7m at review round 2, 1 finding)"
+  printf 'paused: waiting for the run to return a gate or outcome\n' > "$state/parked-w11.status"
+  case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
+    pause\|*) ;;
+    *) fail "the fixture's own classifier verdict is not a pause, so this case pins nothing about the override" ;;
+  esac
+  FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    *"no-mistakes run parked on worker 7m at review round 2, 1 finding"*) ;;
+    *) fail "a run parked on its worker was absorbed as a declared pause: $out" ;;
+  esac
+  pass "handle_wake escalates a run parked on its worker even though the worker declared a pause"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -3132,6 +3152,7 @@ test_stale_paused_classifies_pause
 test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_escalates_a_run_parked_on_its_worker_under_a_declared_pause
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
