@@ -132,8 +132,8 @@ test_parked_run_wakes_once_per_episode_even_under_a_declared_pause() {
     || fail "a run parked on its worker for 7m never woke firstmate: $(cat "$out")"
   [ "$(parked_wakes "$state")" -eq 1 ] \
     || fail "expected exactly one parked-run wake: $(cat "$state/.wake-queue")"
-  grep -F "stale: $WINDOW (task $TASK: no-mistakes run parked on worker 7m at review round 1, 1 finding)" "$out" >/dev/null \
-    || fail "the wake reason lost the task, duration, step, round or finding count: $(cat "$out")"
+  grep -F "stale: $WINDOW (task $TASK: no-mistakes run parked on worker 7m at review, 1 finding)" "$out" >/dev/null \
+    || fail "the wake reason lost the task, duration, step or finding count: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the parked-run wake"
 
   # The same episode keeps being read as parked and must stay silent, however
@@ -146,7 +146,7 @@ test_parked_run_wakes_once_per_episode_even_under_a_declared_pause() {
     || fail "the watcher exited on a long-running parked episode"
   [ "$(parked_wakes "$state")" -eq 0 ] \
     || fail "a long parked episode woke again: $(cat "$state/.wake-queue")"
-  pass "a parked run wakes once per episode with task, step, round, duration and finding count, under a declared pause"
+  pass "a parked run wakes once per episode with task, step, duration and finding count, under a declared pause"
 }
 
 test_parked_run_reason_reports_plural_findings_and_longer_durations() {
@@ -154,7 +154,7 @@ test_parked_run_reason_reports_plural_findings_and_longer_durations() {
   dir=$(parked_case wake-plural); state="$dir/state"; out="$dir/watch.out"
   parked_round "$dir" "$(parked_verdict 4500 2 01RUNPARK test)" wake \
     || fail "a run parked for over an hour never woke: $(cat "$out")"
-  grep -F "no-mistakes run parked on worker 1h15m at test round 1, 2 findings)" "$out" >/dev/null \
+  grep -F "no-mistakes run parked on worker 1h15m at test, 2 findings)" "$out" >/dev/null \
     || fail "the plural finding count or the hour duration was misworded: $(cat "$out")"
   pass "the wake reason words plural findings and hour-long waits"
 }
@@ -199,7 +199,7 @@ test_leaving_and_reentering_parked_starts_a_new_episode() {
   dir=$(parked_case reenter); state="$dir/state"; out="$dir/watch.out"
 
   parked_round "$dir" "$(parked_verdict 360 1)" wake || fail "the first episode never woke: $(cat "$out")"
-  grep -F 'at review round 1,' "$out" >/dev/null || fail "the first episode was not round 1: $(cat "$out")"
+  grep -F 'at review, 1 finding)' "$out" >/dev/null || fail "the first wake lost the step or finding count: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the first wake"
 
   # An unreadable verdict neither ends nor reopens the episode.
@@ -216,23 +216,76 @@ test_leaving_and_reentering_parked_starts_a_new_episode() {
   parked_round "$dir" "$(parked_verdict 330 2)" wake \
     || fail "re-entering the parked state never produced a second wake: $(cat "$dir/watch.out")"
   [ "$(parked_wakes "$state")" -eq 1 ] || fail "expected exactly one second wake: $(cat "$state/.wake-queue")"
-  grep -F 'at review round 2, 2 findings)' "$dir/watch.out" >/dev/null \
-    || fail "the second episode was not reported as round 2: $(cat "$dir/watch.out")"
+  grep -F 'at review, 2 findings)' "$dir/watch.out" >/dev/null \
+    || fail "the second episode lost the step or finding count: $(cat "$dir/watch.out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the second wake"
 
   # A clock that went backwards is a leave-and-return that no read observed.
   parked_round "$dir" "$(parked_verdict 305 1)" wake \
     || fail "a parked clock that restarted did not open a new episode: $(cat "$dir/watch.out")"
-  grep -F 'at review round 3,' "$dir/watch.out" >/dev/null \
-    || fail "the unobserved re-entry was not round 3: $(cat "$dir/watch.out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the third wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the restarted-clock wake"
 
-  # A different step is its own episode and starts at round 1.
+  # A different step is its own episode.
   parked_round "$dir" "$(parked_verdict 400 1 01RUNPARK test)" wake \
     || fail "parking at a different step did not wake: $(cat "$dir/watch.out")"
-  grep -F 'at test round 1,' "$dir/watch.out" >/dev/null \
-    || fail "a new step did not restart the round count: $(cat "$dir/watch.out")"
-  pass "leaving and re-entering parked wakes again with the next round; unreadable reads and a steady episode do not"
+  grep -F 'at test, 1 finding)' "$dir/watch.out" >/dev/null \
+    || fail "a new step was not named in the wake: $(cat "$dir/watch.out")"
+  pass "leaving and re-entering parked wakes again; an unreadable read and a steady episode do not"
+}
+
+# Each non-definite read is its own case: stacking several non-working verdicts
+# in one lane trips the ordinary stale path, which is not this tick.
+test_a_non_definite_read_preserves_the_episode() {
+  local dir state rec name verdict
+  for name in timed-out no-clock other-source; do
+    case "$name" in
+      timed-out) verdict='state: unknown · source: none · no run attributed (run-only read)' ;;
+      no-clock) verdict='state: parked · source: run-step · parked at review: 1 finding(s) · run: 01RUNPARK' ;;
+      other-source) verdict='state: done · source: status-log · checks green' ;;
+    esac
+    dir=$(parked_case "preserve-$name"); state="$dir/state"
+    parked_round "$dir" "$(parked_verdict 360 1)" wake || fail "$name: the episode never woke: $(cat "$dir/watch.out")"
+    ack_stopped_cycle "$state" || fail "$name: could not acknowledge the wake"
+    rec=$(cat "$state/.parked-run-$TASK")
+    [ -n "$rec" ] || fail "$name: the wake left no episode record"
+    parked_round "$dir" "$verdict" quiet || fail "$name: the non-definite read exited the watcher: $(cat "$dir/watch.out")"
+    [ "$(cat "$state/.parked-run-$TASK")" = "$rec" ] || fail "$name: a non-definite read closed the episode record"
+    parked_round "$dir" "$(parked_verdict 700 1)" quiet || fail "$name: the watcher exited on the same episode"
+    [ "$(parked_wakes "$state")" -eq 0 ] || fail "$name: a non-definite read reopened the episode: $(cat "$state/.wake-queue")"
+  done
+
+  # crew-state printing nothing is the other unreadable shape. The shared fake
+  # substitutes a default for an empty override, so this case replaces it.
+  dir=$(parked_case preserve-empty); state="$dir/state"
+  parked_round "$dir" "$(parked_verdict 360 1)" wake || fail "empty: the episode never woke: $(cat "$dir/watch.out")"
+  ack_stopped_cycle "$state" || fail "empty: could not acknowledge the wake"
+  rec=$(cat "$state/.parked-run-$TASK")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/fakebin/fm-crew-state.sh"
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
+  parked_round "$dir" 'unused' quiet || fail "empty: an empty read exited the watcher: $(cat "$dir/watch.out")"
+  [ "$(cat "$state/.parked-run-$TASK")" = "$rec" ] || fail "empty: an empty read closed the episode record"
+  make_fake_crew_state "$dir/fakebin" >/dev/null
+  parked_round "$dir" "$(parked_verdict 700 1)" quiet || fail "empty: the watcher exited on the same episode"
+  [ "$(parked_wakes "$state")" -eq 0 ] || fail "empty: an empty read reopened the episode: $(cat "$state/.wake-queue")"
+  pass "an unreadable, timed-out, empty, or clockless read keeps the episode and does not wake again"
+}
+
+test_a_finished_or_failed_run_ends_the_episode() {
+  local dir state name verdict
+  for name in done failed; do
+    case "$name" in
+      done) verdict='state: done · source: run-step · checks green: PR ready for review' ;;
+      failed) verdict='state: failed · source: run-step · run failed' ;;
+    esac
+    dir=$(parked_case "left-$name"); state="$dir/state"
+    parked_round "$dir" "$(parked_verdict 360 1)" wake || fail "the episode never woke before $name: $(cat "$dir/watch.out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the wake before $name"
+    parked_round "$dir" "$verdict" quiet || fail "a $name run read exited the watcher"
+    parked_round "$dir" "$(parked_verdict 360 1)" wake \
+      || fail "a $name run did not open a new episode when it parked again: $(cat "$dir/watch.out")"
+    [ "$(parked_wakes "$state")" -eq 1 ] || fail "expected one new wake after the run $name: $(cat "$state/.wake-queue")"
+  done
+  pass "a finished or failed run ends the episode, so the next park wakes again"
 }
 
 test_postures_that_already_account_for_the_wait_stay_silent() {
@@ -258,7 +311,7 @@ test_postures_that_already_account_for_the_wait_stay_silent() {
   pass "a captain-held transfer and a human-owed gate with its decision already open stay silent; every other parked gate wakes"
 }
 
-test_threshold_is_configurable_and_can_be_turned_off() {
+test_threshold_is_configurable_and_unusable_values_use_the_default() {
   local dir state
   dir=$(parked_case config-default); state="$dir/state"
   parked_round "$dir" "$(parked_verdict 200 1)" quiet || fail "the default-threshold case exited"
@@ -279,10 +332,18 @@ test_threshold_is_configurable_and_can_be_turned_off() {
 
   dir=$(parked_case config-off); state="$dir/state"
   printf 'off\n' > "$dir/config/parked-run-secs"
-  parked_round "$dir" "$(parked_verdict 99999 1)" quiet || fail "the disabled case exited"
-  [ "$(parked_wakes "$state")" -eq 0 ] || fail "config/parked-run-secs=off still woke"
-  [ ! -e "$state/.parked-run-check-$TASK" ] || fail "a disabled tick still read the run"
-  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; off disables it and garbage cannot"
+  parked_round "$dir" "$(parked_verdict 200 1)" quiet || fail "the off-as-default case exited"
+  [ "$(parked_wakes "$state")" -eq 0 ] || fail "off woke a run under the 300s default"
+  dir=$(parked_case config-off-long); state="$dir/state"
+  printf 'off\n' > "$dir/config/parked-run-secs"
+  parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "config/parked-run-secs=off silenced a run past the default: $(cat "$dir/watch.out")"
+  dir=$(parked_case env-off); state="$dir/state"
+  parked_round "$dir" "$(parked_verdict 400 1)" wake FM_PARKED_RUN_SECS=off \
+    || fail "FM_PARKED_RUN_SECS=off silenced the tick: $(cat "$dir/watch.out")"
+  dir=$(parked_case config-zero); state="$dir/state"
+  printf '0\n' > "$dir/config/parked-run-secs"
+  parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "a zero threshold silenced the tick instead of using the default"
+  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; unusable values including off use the default"
 }
 
 test_away_posture_queues_the_wake_for_the_daemon() {
@@ -299,6 +360,8 @@ test_parked_run_reason_reports_plural_findings_and_longer_durations
 test_runs_that_are_not_parked_on_the_worker_stay_silent
 test_a_task_with_no_run_or_not_a_ship_stays_silent
 test_leaving_and_reentering_parked_starts_a_new_episode
+test_a_non_definite_read_preserves_the_episode
+test_a_finished_or_failed_run_ends_the_episode
 test_postures_that_already_account_for_the_wait_stay_silent
-test_threshold_is_configurable_and_can_be_turned_off
+test_threshold_is_configurable_and_unusable_values_use_the_default
 test_away_posture_queues_the_wake_for_the_daemon

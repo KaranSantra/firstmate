@@ -83,7 +83,7 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
-#   stale: <window> (task <id>: no-mistakes run parked on worker <dur> at <step> round <n>[, <k> finding(s)])
+#   stale: <window> (task <id>: no-mistakes run parked on worker <dur> at <step>[, <k> finding(s)])
 #                          a task's no-mistakes run has sat on `awaiting_agent:
 #                          parked` past FM_PARKED_RUN_SECS (default 300, or
 #                          config/parked-run-secs), whatever its declared wait
@@ -2052,21 +2052,19 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # run's `awaiting_agent` line, so an episode that began before this watcher
 # started, or between two reads, still counts from when it really began.
 # Threshold: FM_PARKED_RUN_SECS, else the first line of config/parked-run-secs,
-# else 300; `off` disables the tick, and any other unusable value falls back to
-# the default so a typo can never silence it. It is re-read every tick, so an
-# edit applies without restarting the watcher.
+# else 300. Any unusable value falls back to the default so a typo can never
+# silence it. It is re-read every tick, so an edit applies without restarting
+# the watcher.
 #
-# One wake per parked EPISODE, and an episode ends only when the run is read as
-# no longer parked on its worker (a fix round or the next step is running, the
-# run finished, or it left the pipeline). An unreadable verdict (`unknown`)
-# changes nothing, so a transient daemon hiccup can neither end an episode nor
-# open one. A reading whose clock is lower than the previous reading, or one
-# that names a different run or step, is a new episode whose end was not
-# observed. The record, .parked-run-<task>, is one tab line:
-#   <run>  <step>  <round>  <last-parked-secs>  <active|idle>  <alerted 0|1>
-# "round" counts the episodes this watcher has seen for the same run at the same
-# step, starting at 1: the pipeline reports no round number of its own, so a fix
-# round that parks and resolves entirely between two reads is not counted.
+# One wake per parked EPISODE. An episode ends only when a run-step read says
+# the run left the parked-on-worker state (it is working, finished, or failed).
+# Any other read, including an unreadable or timed-out verdict, an empty line,
+# a non-run source, and a parked gate with no worker clock, leaves the record
+# untouched, so it can neither end an episode nor open one. A reading whose
+# clock is lower than the previous reading, or one that names a different run
+# or step, is a new episode whose end was not observed. The record,
+# .parked-run-<task>, is one tab line:
+#   <run>  <step>  <last-parked-secs>  <active|idle>  <alerted 0|1>
 #
 # Postures are unchanged. The tick reads only runs parked on their worker, so a
 # task with no run, a running run, and an external wait with nothing parked all
@@ -2081,14 +2079,13 @@ PARKED_RUN_CHECK_SECS=${FM_PARKED_RUN_CHECK_SECS:-60}
 case "$PARKED_RUN_CHECK_SECS" in ''|*[!0-9]*|0) PARKED_RUN_CHECK_SECS=60 ;; esac
 PARKED_RUN_READS_PER_POLL=3
 
-parked_run_threshold() {  # -> seconds, or "off"
+parked_run_threshold() {  # -> seconds
   local v=${FM_PARKED_RUN_SECS-} f="$CONFIG/parked-run-secs"
   if [ -z "$v" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
     IFS= read -r v < "$f" 2>/dev/null || true
     v=${v//[[:space:]]/}
   fi
   case "$v" in
-    off) printf 'off' ;;
     ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT" ;;
     *) v=$((10#$v)); if [ "$v" -gt 0 ]; then printf '%s' "$v"; else printf '%s' "$PARKED_RUN_SECS_DEFAULT"; fi ;;
   esac
@@ -2102,33 +2099,25 @@ parked_run_fmt_secs() {  # <seconds>
   fi
 }
 
-parked_run_record_write() {  # <task> <run> <step> <round> <secs> <active|idle> <alerted>
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" "$7" > "$STATE/.parked-run-$1"
+parked_run_record_write() {  # <task> <run> <step> <secs> <active|idle> <alerted>
+  printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" > "$STATE/.parked-run-$1"
 }
 
 # <task> <window> <threshold>: a reading whose verdict parsed as parked on the
 # worker (fm_parked_run_parse set the FM_PARKED_* facts).
 parked_run_observe() {
   local task=$1 win=$2 threshold=$3 rec="$STATE/.parked-run-$1" statusf="$STATE/$1.status"
-  local r_run='' r_step='' r_round=0 r_last=0 r_state=idle r_alerted=0 run step round alerted=0
+  local r_run='' r_step='' r_last=0 r_state=idle r_alerted=0 run step alerted=0
   local dur reason findings=''
   run=${FM_PARKED_RUN:--}; step=$FM_PARKED_STEP
   if [ -f "$rec" ] && [ ! -L "$rec" ]; then
-    IFS=$'\t' read -r r_run r_step r_round r_last r_state r_alerted < "$rec" 2>/dev/null || true
+    IFS=$'\t' read -r r_run r_step r_last r_state r_alerted < "$rec" 2>/dev/null || true
   fi
-  case "$r_round" in ''|*[!0-9]*) r_round=0 ;; esac
   case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
-  if [ "$r_run" = "$run" ] && [ "$r_step" = "$step" ]; then
-    round=$r_round
-    if [ "$r_state" = active ] && [ "$FM_PARKED_SECS" -ge "$r_last" ]; then
-      [ "$r_alerted" = 1 ] && alerted=1
-    else
-      round=$((round + 1))
-    fi
-  else
-    round=1
+  if [ "$r_run" = "$run" ] && [ "$r_step" = "$step" ] \
+    && [ "$r_state" = active ] && [ "$FM_PARKED_SECS" -ge "$r_last" ]; then
+    [ "$r_alerted" = 1 ] && alerted=1
   fi
-  [ "$round" -ge 1 ] || round=1
   if [ "$alerted" -eq 0 ] && [ "$FM_PARKED_SECS" -ge "$threshold" ]; then
     if status_is_captain_held "$(status_declared_wait_line "$statusf")"; then
       triage_log "absorbed parked run (verified captain-held transfer): $task"
@@ -2139,20 +2128,19 @@ parked_run_observe() {
       if [ -n "$FM_PARKED_FINDINGS" ]; then
         if [ "$FM_PARKED_FINDINGS" = 1 ]; then findings=", 1 finding"; else findings=", $FM_PARKED_FINDINGS findings"; fi
       fi
-      reason="stale: $win (task $task: no-mistakes run parked on worker $dur at $step round $round$findings)"
+      reason="stale: $win (task $task: no-mistakes run parked on worker $dur at $step$findings)"
       fm_wake_append stale "$win" "$reason" || exit 1
-      parked_run_record_write "$task" "$run" "$step" "$round" "$FM_PARKED_SECS" active 1
+      parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active 1
       wake "$reason"
     fi
   fi
-  parked_run_record_write "$task" "$run" "$step" "$round" "$FM_PARKED_SECS" active "$alerted"
+  parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active "$alerted"
 }
 
 parked_run_tick() {
   local threshold meta kind task win marker due next line state src reads=0 rec
-  local r_run r_step r_round r_last r_state r_alerted
+  local r_run='' r_step=''
   threshold=$(parked_run_threshold)
-  [ "$threshold" != off ] || return 0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
@@ -2184,15 +2172,15 @@ parked_run_tick() {
     printf '%s' "$next" > "$marker"
     if fm_parked_run_parse "$line"; then
       parked_run_observe "$task" "$win" "$threshold"
-    elif [ "$state" = unknown ] && [ "$src" = run-step ]; then
-      :  # unreadable run: neither ends nor opens an episode
-    elif [ "$src" = run-step ] && { [ "$state" = working ] || [ "$state" = parked ]; } && [ -f "$rec" ] && [ ! -L "$rec" ]; then
-      # Not parked on the worker now: close the episode but keep the round count
-      # for the next time this run parks at this step.
-      IFS=$'\t' read -r r_run r_step r_round r_last r_state r_alerted < "$rec" 2>/dev/null || true
-      parked_run_record_write "$task" "$r_run" "$r_step" "${r_round:-0}" 0 idle 0
-    else
-      rm -f "$rec"
+    elif [ "$src" = run-step ] && [ -f "$rec" ] && [ ! -L "$rec" ]; then
+      case "$state" in
+        working|done|failed)
+          r_run=''; r_step=''
+          IFS=$'\t' read -r r_run r_step < "$rec" 2>/dev/null || true
+          r_step=${r_step%%$'\t'*}
+          parked_run_record_write "$task" "$r_run" "$r_step" 0 idle 0
+          ;;
+      esac
     fi
   done
   return 0

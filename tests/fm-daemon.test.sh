@@ -980,7 +980,7 @@ test_handle_wake_escalates_a_run_parked_on_its_worker_under_a_declared_pause() {
   dir=$(make_supercase handle-parked-run)
   state="$dir/state"
   win="sess:fm-parked-w11"
-  reason="stale: $win (task parked-w11: no-mistakes run parked on worker 7m at review round 2, 1 finding)"
+  reason="stale: $win (task parked-w11: no-mistakes run parked on worker 7m at review, 1 finding)"
   printf 'paused: waiting for the run to return a gate or outcome\n' > "$state/parked-w11.status"
   case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
     pause\|*) ;;
@@ -989,7 +989,7 @@ test_handle_wake_escalates_a_run_parked_on_its_worker_under_a_declared_pause() {
   FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
   case "$out" in
-    *"no-mistakes run parked on worker 7m at review round 2, 1 finding"*) ;;
+    *"no-mistakes run parked on worker 7m at review, 1 finding"*) ;;
     *) fail "a run parked on its worker was absorbed as a declared pause: $out" ;;
   esac
   pass "handle_wake escalates a run parked on its worker even though the worker declared a pause"

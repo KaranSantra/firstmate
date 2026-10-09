@@ -3581,9 +3581,9 @@ working: still parked at that gate'
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
   [ ! -e "$dir/config/wedge-defer-parked-gate" ] \
     || fail "the unarmed fixture armed the flag, so it proves nothing"
-  # This counts the wedge timer's own reads, so the independent parked-run tick
-  # (tests/fm-watch-parked-run.test.sh owns it) is switched off for the case.
-  export FM_PARKED_RUN_SECS=off
+  # This counts the wedge timer's own reads. The parked-run tick reads the same
+  # fake on its own cadence and cannot be switched off, so hold that read not-due.
+  printf '999999\n' > "$state/.parked-run-check-wedge"
   export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
   : > "$FM_FAKE_CREW_STATE_LOG"
   n=1
@@ -3614,13 +3614,14 @@ working: still parked at that gate'
   dir=$(wedge_threshold_fixture parked-gate-armed-probe-count "$escalated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '999999\n' > "$state/.parked-run-check-wedge"
   export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
   : > "$FM_FAKE_CREW_STATE_LOG"
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
     || fail "the armed control was never rechecked: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
   armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
-  unset FM_FAKE_CREW_STATE_LOG FM_PARKED_RUN_SECS
+  unset FM_FAKE_CREW_STATE_LOG
   [ "$armed_probes" -gt 0 ] \
     || fail "the armed control spent no current-state read, so the probe count proves nothing"
   pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder, wording and reads"
