@@ -2079,15 +2079,22 @@ PARKED_RUN_CHECK_SECS=60
 PARKED_RUN_READS_PER_POLL=3
 
 parked_run_threshold() {  # -> seconds
-  local v=${FM_PARKED_RUN_SECS-} f="$CONFIG/parked-run-secs"
+  local v=${FM_PARKED_RUN_SECS-} f="$CONFIG/parked-run-secs" LC_ALL=C
   if [ -z "$v" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
     IFS= read -r v < "$f" 2>/dev/null || true
-    v=${v//[[:space:]]/}
+    v=${v#"${v%%[![:space:]]*}"}
+    v=${v%"${v##*[![:space:]]}"}
   fi
   case "$v" in
-    ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT" ;;
-    *) v=$((10#$v)); if [ "$v" -gt 0 ]; then printf '%s' "$v"; else printf '%s' "$PARKED_RUN_SECS_DEFAULT"; fi ;;
+    ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT"; return ;;
   esac
+  v=${v#"${v%%[!0]*}"}
+  if [ -z "$v" ] || [ "${#v}" -gt 19 ] \
+    || { [ "${#v}" -eq 19 ] && [[ "$v" > 9223372036854775807 ]]; }; then
+    printf '%s' "$PARKED_RUN_SECS_DEFAULT"
+  else
+    printf '%s' "$v"
+  fi
 }
 
 parked_run_fmt_secs() {  # <seconds>
@@ -2137,7 +2144,7 @@ parked_run_observe() {
 }
 
 parked_run_tick() {
-  local threshold meta kind task win marker due age next line state src reads=0 rec
+  local threshold meta kind task win marker due age line state src reads=0 rec
   local r_run='' r_step=''
   local -a candidates=()
   threshold=$(parked_run_threshold)
@@ -2165,7 +2172,6 @@ parked_run_tick() {
     marker="$STATE/.parked-run-check-$task"
     reads=$((reads + 1))
     line=$(FM_CREW_STATE_RUN_ONLY=1 FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-    next=$PARKED_RUN_CHECK_SECS
     rec="$STATE/.parked-run-$task"
     state=''; src=''
     case "$line" in
@@ -2174,10 +2180,7 @@ parked_run_tick() {
         src=${line#*source: }; src=${src%% *}
         ;;
     esac
-    # A task with no run is re-read on a longer interval: it can only start
-    # one by invoking the pipeline, which takes minutes to reach a gate.
-    [ "$src" = run-step ] || next=$((PARKED_RUN_CHECK_SECS * 4))
-    printf '%s' "$next" > "$marker"
+    printf '%s' "$PARKED_RUN_CHECK_SECS" > "$marker"
     if fm_parked_run_parse "$line"; then
       parked_run_observe "$task" "$win" "$threshold"
     elif [ "$src" = run-step ] && [ -f "$rec" ] && [ ! -L "$rec" ]; then

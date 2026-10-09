@@ -184,14 +184,14 @@ test_a_task_with_no_run_or_not_a_ship_stays_silent() {
   dir=$(parked_case no-run); state="$dir/state"
   parked_round "$dir" 'state: paused · source: status-log · waiting' quiet || fail "the no-run case exited"
   [ ! -e "$state/.parked-run-$TASK" ] || fail "a task with no run left an episode record"
-  [ "$(cat "$state/.parked-run-check-$TASK" 2>/dev/null)" = 240 ] \
-    || fail "a task with no run was not put on the longer re-read interval"
+  [ "$(cat "$state/.parked-run-check-$TASK" 2>/dev/null)" = 60 ] \
+    || fail "a task with no run did not keep the fixed 60s re-read interval"
 
   dir=$(parked_case scout-kind "$PAUSED_LINE" scout); state="$dir/state"
   parked_round "$dir" "$(parked_verdict 900 1)" quiet || fail "the scout case exited"
   [ "$(parked_wakes "$state")" -eq 0 ] || fail "a scout task woke on a parked run"
   [ ! -e "$state/.parked-run-check-$TASK" ] || fail "a scout task was read at all"
-  pass "a task with no run backs off, and scout tasks are never read"
+  pass "a task with no run keeps the 60s cadence, and scout tasks are never read"
 }
 
 test_oldest_due_run_is_read_before_the_cap() {
@@ -367,7 +367,25 @@ test_threshold_is_configurable_and_unusable_values_use_the_default() {
   dir=$(parked_case config-zero); state="$dir/state"
   printf '0\n' > "$dir/config/parked-run-secs"
   parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "a zero threshold silenced the tick instead of using the default"
-  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; unusable values use the default"
+
+  dir=$(parked_case config-spaced); state="$dir/state"
+  printf ' 120 \t\n' > "$dir/config/parked-run-secs"
+  parked_round "$dir" "$(parked_verdict 200 1)" wake || fail "surrounding config whitespace hid a valid threshold"
+
+  dir=$(parked_case config-internal-space); state="$dir/state"
+  printf '6 00\n' > "$dir/config/parked-run-secs"
+  parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "internal config whitespace delayed a parked-run wake"
+  dir=$(parked_case env-internal-space); state="$dir/state"
+  parked_round "$dir" "$(parked_verdict 400 1)" wake 'FM_PARKED_RUN_SECS=6 00' \
+    || fail "internal environment whitespace delayed a parked-run wake"
+
+  dir=$(parked_case config-overflow); state="$dir/state"
+  printf '18446744073709551621\n' > "$dir/config/parked-run-secs"
+  parked_round "$dir" "$(parked_verdict 200 1)" quiet || fail "an overflowing config threshold wrapped below the default"
+  dir=$(parked_case env-overflow); state="$dir/state"
+  parked_round "$dir" "$(parked_verdict 200 1)" quiet FM_PARKED_RUN_SECS=18446744073709551621 \
+    || fail "an overflowing environment threshold wrapped below the default"
+  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; malformed and overflowing values use the default"
 }
 
 test_away_posture_queues_the_wake_for_the_daemon() {

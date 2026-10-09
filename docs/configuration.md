@@ -611,7 +611,7 @@ Each parked episode raises one wake whose reason names the task, the step, how l
 Only a run parked on its worker is affected: tasks with no run, running runs, scouts, and waits with nothing parked behave as before.
 A verified captain-held transfer and a gate owed to a human whose decision is already open with firstmate never raise it.
 
-[`architecture.md`](architecture.md) owns the wake contract; `bin/fm-watch.sh`'s `parked_run_tick` owns the episode rules and reads each task's run on a fixed 60-second cadence.
+[`architecture.md`](architecture.md) owns the wake contract; `bin/fm-watch.sh`'s `parked_run_tick` owns the episode rules and reads up to three oldest-due ship tasks per poll on a fixed 60-second cadence, including tasks with no attributed run.
 The file is a home-local supervision preference and is not inherited by secondmate homes.
 
 ## Gate defaults (.no-mistakes.yaml)
