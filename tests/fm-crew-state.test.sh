@@ -1154,7 +1154,7 @@ test_parked_for_component_comes_from_the_runs_awaiting_agent_clock() {
   # The run's own `awaiting_agent: parked <duration>` clock is what the watcher's
   # parked-run wake measures against, so it must reach the verdict as a whole
   # component, in seconds, for every duration shape the pipeline prints.
-  for dur_want in '2m10s=130' '1h2m3s=3723' '45s=45' '0s=0' '3h=10800' '1m0.5s=60'; do
+  for dur_want in '2m10s=130' '1h2m3s=3723' '2d14h=223200' '45s=45' '0s=0' '3h=10800' '1m0.5s=60'; do
     dur=${dur_want%%=*}; want=${dur_want#*=}
     n=$((n + 1))
     reset_fakes

@@ -569,12 +569,14 @@ nm_awaiting_agent_seconds() {
     case "$v" in .*) v=${v#.}; v=${v#"${v%%[!0-9]*}"} ;; esac
     case "$v" in
       ms*) unit=ms; v=${v#ms} ;;
+      d*) unit=d; v=${v#d} ;;
       h*) unit=h; v=${v#h} ;;
       m*) unit=m; v=${v#m} ;;
       s*) unit=s; v=${v#s} ;;
       *) return 0 ;;
     esac
     case "$unit" in
+      d) total=$((total + 10#$num * 86400)) ;;
       h) total=$((total + 10#$num * 3600)) ;;
       m) total=$((total + 10#$num * 60)) ;;
       s) total=$((total + 10#$num)) ;;

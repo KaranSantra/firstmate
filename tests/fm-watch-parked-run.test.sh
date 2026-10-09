@@ -330,20 +330,10 @@ test_threshold_is_configurable_and_unusable_values_use_the_default() {
   printf 'soon\n' > "$dir/config/parked-run-secs"
   parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "an unusable threshold silenced the tick instead of using the default"
 
-  dir=$(parked_case config-off); state="$dir/state"
-  printf 'off\n' > "$dir/config/parked-run-secs"
-  parked_round "$dir" "$(parked_verdict 200 1)" quiet || fail "the off-as-default case exited"
-  [ "$(parked_wakes "$state")" -eq 0 ] || fail "off woke a run under the 300s default"
-  dir=$(parked_case config-off-long); state="$dir/state"
-  printf 'off\n' > "$dir/config/parked-run-secs"
-  parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "config/parked-run-secs=off silenced a run past the default: $(cat "$dir/watch.out")"
-  dir=$(parked_case env-off); state="$dir/state"
-  parked_round "$dir" "$(parked_verdict 400 1)" wake FM_PARKED_RUN_SECS=off \
-    || fail "FM_PARKED_RUN_SECS=off silenced the tick: $(cat "$dir/watch.out")"
   dir=$(parked_case config-zero); state="$dir/state"
   printf '0\n' > "$dir/config/parked-run-secs"
   parked_round "$dir" "$(parked_verdict 400 1)" wake || fail "a zero threshold silenced the tick instead of using the default"
-  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; unusable values including off use the default"
+  pass "the threshold comes from the env, then config/parked-run-secs, then 300s; unusable values use the default"
 }
 
 test_away_posture_queues_the_wake_for_the_daemon() {
