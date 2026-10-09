@@ -1121,6 +1121,9 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  if [ "$RUN_SOURCE" = full ] && [ -z "$SELECTED_RUN_ID" ]; then
+    SELECTED_RUN_ID=$(strip_quotes "$(nm_field id)")
+  fi
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""

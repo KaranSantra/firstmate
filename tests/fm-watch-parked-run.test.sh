@@ -112,7 +112,7 @@ parked_round() {  # <dir> <verdict> <wake|quiet> [env...]
     FM_CONFIG_OVERRIDE="$dir/config" "$FAKE_VAR=$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_PARKED_RUN_CHECK_SECS=1 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 \
     FM_STALE_ESCALATE_SECS=999999 "$@" "$WATCH" > "$out" &
   pid=$!
   if [ "$expect" = wake ]; then
@@ -184,7 +184,7 @@ test_a_task_with_no_run_or_not_a_ship_stays_silent() {
   dir=$(parked_case no-run); state="$dir/state"
   parked_round "$dir" 'state: paused · source: status-log · waiting' quiet || fail "the no-run case exited"
   [ ! -e "$state/.parked-run-$TASK" ] || fail "a task with no run left an episode record"
-  [ "$(cat "$state/.parked-run-check-$TASK" 2>/dev/null)" = 4 ] \
+  [ "$(cat "$state/.parked-run-check-$TASK" 2>/dev/null)" = 240 ] \
     || fail "a task with no run was not put on the longer re-read interval"
 
   dir=$(parked_case scout-kind "$PAUSED_LINE" scout); state="$dir/state"
@@ -192,6 +192,40 @@ test_a_task_with_no_run_or_not_a_ship_stays_silent() {
   [ "$(parked_wakes "$state")" -eq 0 ] || fail "a scout task woke on a parked run"
   [ ! -e "$state/.parked-run-check-$TASK" ] || fail "a scout task was read at all"
   pass "a task with no run backs off, and scout tasks are never read"
+}
+
+test_oldest_due_run_is_read_before_the_cap() {
+  local dir state name back
+  dir=$(parked_case oldest-due); state="$dir/state"
+  back=$(( $(date +%s) - 120 ))
+  for name in a01 a02 a03 a04 a05 a06 a07 a08 a09 a10 a11 a12; do
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$WINDOW" > "$state/$name.meta"
+    printf '60' > "$state/.parked-run-check-$name"
+    fm_touch_epoch "$back" "$state/.parked-run-check-$name"
+  done
+  parked_round "$dir" "$(parked_verdict 420 1)" wake \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' FM_POLL=60 \
+    || fail "a later-listed parked task was skipped behind twelve due working runs: $(cat "$dir/watch.out")"
+  [ "$(parked_wakes "$state")" -eq 1 ] || fail "the oldest due parked run did not wake in the first poll"
+  pass "an oldest-due parked run is read before the per-poll cap"
+}
+
+test_run_only_read_skips_forge() {
+  local dir state
+  dir=$(parked_case no-forge); state="$dir/state"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_CREW_STATE_RUN_ONLY:-}" = 1 ]; then
+  printf '%s\n' "${FM_CREW_STATE_NO_FORGE:-unset}" >> "$FM_FAKE_CREW_STATE_LOG"
+fi
+printf '%s\n' 'state: done · source: run-step · run completed'
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
+  parked_round "$dir" unused quiet FM_FAKE_CREW_STATE_LOG="$dir/no-forge.log" \
+    || fail "a terminal run unexpectedly woke the watcher: $(cat "$dir/watch.out")"
+  [ "$(cat "$dir/no-forge.log")" = 1 ] || fail "the run-only watcher read did not suppress forge access"
+  [ "$(parked_wakes "$state")" -eq 0 ] || fail "a terminal run woke as parked"
+  pass "a run-only terminal read skips forge access"
 }
 
 test_leaving_and_reentering_parked_starts_a_new_episode() {
@@ -349,6 +383,8 @@ test_parked_run_wakes_once_per_episode_even_under_a_declared_pause
 test_parked_run_reason_reports_plural_findings_and_longer_durations
 test_runs_that_are_not_parked_on_the_worker_stay_silent
 test_a_task_with_no_run_or_not_a_ship_stays_silent
+test_oldest_due_run_is_read_before_the_cap
+test_run_only_read_skips_forge
 test_leaving_and_reentering_parked_starts_a_new_episode
 test_a_non_definite_read_preserves_the_episode
 test_a_finished_or_failed_run_ends_the_episode

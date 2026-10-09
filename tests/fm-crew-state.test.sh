@@ -1040,6 +1040,9 @@ test_genuine_parked_not_superseded() {
   local out; out=$(run_crew_state "$d" feat-c)
   assert_contains "$out" "state: parked" "genuine parked run -> parked"
   assert_contains "$out" "source: run-step" "parked -> run-step source"
+  assert_contains "$out" " · run: 01RUN" "the attributed legacy parked run names its verified id"
+  out=$(FM_CREW_STATE_RUN_ONLY=1 run_crew_state "$d" feat-c)
+  assert_contains "$out" " · run: 01RUN" "the run-only read retains the legacy run id"
   assert_contains "$out" "2 finding(s)" "parked includes gate finding count"
   assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"

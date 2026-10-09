@@ -2075,8 +2075,7 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # While state/.afk exists the wake is queued like every other and the away
 # daemon classifies it (bin/fm-supervise-daemon.sh escalates this reason).
 PARKED_RUN_SECS_DEFAULT=300
-PARKED_RUN_CHECK_SECS=${FM_PARKED_RUN_CHECK_SECS:-60}
-case "$PARKED_RUN_CHECK_SECS" in ''|*[!0-9]*|0) PARKED_RUN_CHECK_SECS=60 ;; esac
+PARKED_RUN_CHECK_SECS=60
 PARKED_RUN_READS_PER_POLL=3
 
 parked_run_threshold() {  # -> seconds
@@ -2138,8 +2137,9 @@ parked_run_observe() {
 }
 
 parked_run_tick() {
-  local threshold meta kind task win marker due next line state src reads=0 rec
+  local threshold meta kind task win marker due age next line state src reads=0 rec
   local r_run='' r_step=''
+  local -a candidates=()
   threshold=$(parked_run_threshold)
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -2153,10 +2153,18 @@ parked_run_tick() {
     marker="$STATE/.parked-run-check-$task"
     due=$(cat "$marker" 2>/dev/null || true)
     case "$due" in ''|*[!0-9]*) due=$PARKED_RUN_CHECK_SECS ;; esac
-    [ "$(age_of "$marker")" -ge "$due" ] || continue
+    age=$(age_of "$marker")
+    [ "$age" -ge "$due" ] || continue
+    candidates+=("$((due - age))"$'\t'"$task")
+  done
+  [ "${#candidates[@]}" -gt 0 ] || return 0
+  while IFS=$'\t' read -r _ task; do
     [ "$reads" -lt "$PARKED_RUN_READS_PER_POLL" ] || break
+    win=$(fm_backend_target_of_meta "$STATE/$task.meta")
+    [ -n "$win" ] || continue
+    marker="$STATE/.parked-run-check-$task"
     reads=$((reads + 1))
-    line=$(FM_CREW_STATE_RUN_ONLY=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+    line=$(FM_CREW_STATE_RUN_ONLY=1 FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
     next=$PARKED_RUN_CHECK_SECS
     rec="$STATE/.parked-run-$task"
     state=''; src=''
@@ -2182,7 +2190,7 @@ parked_run_tick() {
           ;;
       esac
     fi
-  done
+  done < <(printf '%s\n' "${candidates[@]}" | LC_ALL=C sort -k1,1n -k2,2)
   return 0
 }
 
