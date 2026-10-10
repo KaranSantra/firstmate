@@ -1,0 +1,12 @@
+===== test_a_finished_or_failed_run_ends_the_episode =====
+ok - a finished or failed run ends the episode, so the next park wakes again
+EXIT:0
+===== test_postures_that_already_account_for_the_wait_stay_silent =====
+ok - a captain-held transfer and a human-owed gate with its decision already open stay silent; every other parked gate wakes
+EXIT:0
+===== test_threshold_is_configurable_and_unusable_values_use_the_default =====
+ok - the threshold comes from the env, then config/parked-run-secs, then 300s; malformed and overflowing values use the default
+EXIT:0
+===== test_away_posture_queues_the_wake_for_the_daemon =====
+ok - while state/.afk exists the wake is queued for the away daemon like every other
+EXIT:0

@@ -1,0 +1,48 @@
+===== test_parked_run_wakes_once_per_episode_even_under_a_declared_pause =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_parked_run_reason_reports_plural_findings_and_longer_durations =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_runs_that_are_not_parked_on_the_worker_stay_silent =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_a_task_with_no_run_or_not_a_ship_stays_silent =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_oldest_due_run_is_read_before_the_cap =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_run_only_read_skips_forge =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_leaving_and_reentering_parked_starts_a_new_episode =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_a_non_definite_read_preserves_the_episode =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_a_finished_or_failed_run_ends_the_episode =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_postures_that_already_account_for_the_wait_stay_silent =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_threshold_is_configurable_and_unusable_values_use_the_default =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127
+===== test_away_posture_queues_the_wake_for_the_daemon =====
+/tmp/parked-body.sh: line 13: /tmp/wake-helpers.sh: No such file or directory
+/tmp/parked-body.sh: line 15: ROOT: unbound variable
+EXIT:127

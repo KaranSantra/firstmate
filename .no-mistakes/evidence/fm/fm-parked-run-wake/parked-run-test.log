@@ -1,0 +1,12 @@
+ok - a parked run wakes once per episode with task, step, duration and finding count, under a declared pause
+ok - the wake reason words plural findings and hour-long waits
+ok - a parked run under the threshold, a working run, a gate with no worker clock, a non-run source, an unreadable run and a finished run all stay silent
+ok - a task with no run keeps the 60s cadence, and scout tasks are never read
+ok - an oldest-due parked run is read before the per-poll cap
+ok - a run-only terminal read skips forge access
+ok - leaving and re-entering parked wakes again; an unreadable read and a steady episode do not
+ok - an unreadable, timed-out, empty, or clockless read keeps the episode and does not wake again
+ok - a finished or failed run ends the episode, so the next park wakes again
+ok - a captain-held transfer and a human-owed gate with its decision already open stay silent; every other parked gate wakes
+ok - the threshold comes from the env, then config/parked-run-secs, then 300s; malformed and overflowing values use the default
+ok - while state/.afk exists the wake is queued for the away daemon like every other

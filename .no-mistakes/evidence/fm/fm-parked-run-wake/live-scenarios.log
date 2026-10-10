@@ -1,0 +1,12 @@
+=== 1. parked run pages under paused: once per episode ===
+PASS: pages once under declared pause with reason
+PASS: same episode stays quiet
+=== 2. threshold default / config / malformed ===
+PASS: 200s quiet under 300s default
+PASS: config 120 wakes at 200s
+PASS: malformed 6 00 falls back to 300 and wakes at 400s
+=== 3. postures already accounting for the wait ===
+PASS: captain-held silent
+PASS: open human decision silent
+PASS: decision for other run still wakes
+=== 4. leave parked and reenter = new episode ===
