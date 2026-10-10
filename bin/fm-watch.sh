@@ -2089,6 +2089,8 @@ parked_run_threshold() {  # -> seconds
     ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT"; return ;;
   esac
   v=${v#"${v%%[!0]*}"}
+  # String > (not -gt): 19-digit values can exceed bash arithmetic range.
+  # shellcheck disable=SC2071
   if [ -z "$v" ] || [ "${#v}" -gt 19 ] \
     || { [ "${#v}" -eq 19 ] && [[ "$v" > 9223372036854775807 ]]; }; then
     printf '%s' "$PARKED_RUN_SECS_DEFAULT"

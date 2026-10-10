@@ -306,7 +306,7 @@ test_a_non_definite_read_preserves_the_episode() {
 
 test_a_finished_or_failed_run_ends_the_episode() {
   local dir state name verdict
-  for name in done failed; do
+  for name in "done" "failed"; do
     case "$name" in
       done) verdict='state: done · source: run-step · checks green: PR ready for review' ;;
       failed) verdict='state: failed · source: run-step · run failed' ;;
