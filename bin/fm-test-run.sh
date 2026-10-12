@@ -183,16 +183,16 @@ MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
-# script is tests/fm-watch-triage.test.sh in the watcher-wake-lock family, at
-# about 434s alone and about 698s under CI load (the hint table below records
-# that loaded figure), and the slowest script in a runner-file changed selection
-# is tests/fm-calm-pi-extension.test.sh at 77s once its Chrome reap terminates.
-# 1500s keeps every measured script under the bound with roughly 2.1x headroom
-# over the slowest loaded measurement, and it stays under the 30-minute normal
-# CI tier so a wedged script fails here, with its output, before the job cap
-# cancels the lane. It is a guard, not a speed control: a HUNG script becomes a
-# bounded failure instead of an unbounded suite, which is the shape that
-# silently outruns a caller's invocation budget.
+# script is tests/fm-supervision-host.test.sh at about 928s under CI load (the
+# portable serial hint table below records that loaded figure), with
+# tests/fm-watch-triage.test.sh next at about 698s, and the slowest script in a
+# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
+# once its Chrome reap terminates. 1500s keeps every measured script under the
+# bound with roughly 1.6x headroom over the slowest loaded measurement, and it
+# stays under the 30-minute normal CI tier so a wedged script fails here, with
+# its output, before the job cap cancels the lane. It is a guard, not a speed
+# control: a HUNG script becomes a bounded failure instead of an unbounded
+# suite, which is the shape that silently outruns a caller's invocation budget.
 CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
@@ -721,7 +721,7 @@ tests/fm-codex-continuity-live-e2e.test.sh 71
 tests/fm-codex-hook-layer-live-e2e.test.sh 47
 tests/fm-composer-codex-idle-live-e2e.test.sh 229
 tests/fm-composer-matrix-live-e2e.test.sh 47
-tests/fm-contributions.test.sh 35676
+tests/fm-contributions.test.sh 138425
 tests/fm-control-relaunch.test.sh 137013
 tests/fm-control.test.sh 39524
 tests/fm-cursor-harness.test.sh 30212
@@ -752,7 +752,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 46
 tests/fm-herdr-version-floor-live-e2e.test.sh 72
 tests/fm-home-summary-refresh.test.sh 37264
 tests/fm-inactive-reconcile.test.sh 53178
-tests/fm-kimi-harness.test.sh 19151
+tests/fm-kimi-harness.test.sh 58721
 tests/fm-lint-workflows.test.sh 785
 tests/fm-live-gate.test.sh 1755
 tests/fm-mail-check.test.sh 9162
@@ -829,7 +829,7 @@ tests/fm-stow-cascade.test.sh 3022
 tests/fm-subagent-pretool-check.test.sh 949
 tests/fm-supervision-events.test.sh 659
 tests/fm-supervision-host-live-e2e.test.sh 50
-tests/fm-supervision-host.test.sh 41512
+tests/fm-supervision-host.test.sh 927873
 tests/fm-tangle-guard.test.sh 7470
 tests/fm-task-delivery.test.sh 19784
 tests/fm-task-inbox.test.sh 30004
