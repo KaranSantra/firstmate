@@ -83,6 +83,14 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+#   stale: <window> (task <id>: no-mistakes run parked on worker <dur> at <step>[, <k> finding(s)])
+#                          a task's no-mistakes run has sat on `awaiting_agent:
+#                          parked` past FM_PARKED_RUN_SECS (default 300, or
+#                          config/parked-run-secs), whatever its declared wait
+#                          says; one wake per parked episode, never for a
+#                          verified captain-held transfer or a human-owed gate
+#                          whose decision is already open (parked_run_tick owns
+#                          the rules)
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -2030,6 +2038,167 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+# A no-mistakes run parked on its WORKER ("awaiting_agent: parked <duration>")
+# is waiting for a move only that worker can make, and nothing on the pane or in
+# the status log says so: a worker that declared `paused: waiting for the run to
+# return a gate or outcome` while its run sat at a review or test gate stayed
+# silent for 20-50 minutes, because every other stale path absorbs a declared
+# wait. This tick reads the run itself instead. It spends no model call: each
+# due task costs one fm-crew-state.sh read, throttled per task and capped per
+# poll below.
+#
+# The run's own clock decides when a parked run needs attention, not the
+# watcher's: fm-crew-state.sh mints it as the `parked-for:` component from the
+# run's `awaiting_agent` line, so an episode that began before this watcher
+# started, or between two reads, still counts from when it really began.
+# Threshold: FM_PARKED_RUN_SECS, else the first line of config/parked-run-secs,
+# else 300. Any unusable value falls back to the default so a typo can never
+# silence it. It is re-read every tick, so an edit applies without restarting
+# the watcher.
+#
+# One wake per parked EPISODE. An episode ends only when a run-step read says
+# the run left the parked-on-worker state (it is working, finished, or failed).
+# Any other read, including an unreadable or timed-out verdict, an empty line,
+# a non-run source, and a parked gate with no worker clock, leaves the record
+# untouched, so it can neither end an episode nor open one. A reading whose
+# clock is lower than the previous reading, or one that names a different run
+# or step, is a new episode whose end was not observed. The record,
+# .parked-run-<task>, is one tab line:
+#   <run>  <step>  <last-parked-secs>  <active|idle>  <alerted 0|1>
+#
+# Postures are unchanged. The tick reads only runs parked on their worker, so a
+# task with no run, a running run, and an external wait with nothing parked all
+# stay silent. A verified captain-held transfer is never woken for, and neither
+# is a gate owed to a human whose needs-decision for THIS run is already open
+# (firstmate was told, and the answer is firstmate's). The tick never answers a
+# gate and never steers the worker; the reason only prompts firstmate to look.
+# While state/.afk exists the wake is queued like every other and the away
+# daemon classifies it (bin/fm-supervise-daemon.sh escalates this reason).
+PARKED_RUN_SECS_DEFAULT=300
+PARKED_RUN_CHECK_SECS=60
+PARKED_RUN_READS_PER_POLL=3
+
+parked_run_threshold() {  # -> seconds
+  local v=${FM_PARKED_RUN_SECS-} f="$CONFIG/parked-run-secs" LC_ALL=C
+  if [ -z "$v" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
+    IFS= read -r v < "$f" 2>/dev/null || true
+    v=${v#"${v%%[![:space:]]*}"}
+    v=${v%"${v##*[![:space:]]}"}
+  fi
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT"; return ;;
+  esac
+  v=${v#"${v%%[!0]*}"}
+  # String > (not -gt): 19-digit values can exceed bash arithmetic range.
+  # shellcheck disable=SC2071
+  if [ -z "$v" ] || [ "${#v}" -gt 19 ] \
+    || { [ "${#v}" -eq 19 ] && [[ "$v" > 9223372036854775807 ]]; }; then
+    printf '%s' "$PARKED_RUN_SECS_DEFAULT"
+  else
+    printf '%s' "$v"
+  fi
+}
+
+parked_run_fmt_secs() {  # <seconds>
+  local s=$1
+  if [ "$s" -lt 60 ]; then printf '%ss' "$s"
+  elif [ "$s" -lt 3600 ]; then printf '%sm' $((s / 60))
+  else printf '%sh%sm' $((s / 3600)) $(((s % 3600) / 60))
+  fi
+}
+
+parked_run_record_write() {  # <task> <run> <step> <secs> <active|idle> <alerted>
+  printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" > "$STATE/.parked-run-$1"
+}
+
+# <task> <window> <threshold>: a reading whose verdict parsed as parked on the
+# worker (fm_parked_run_parse set the FM_PARKED_* facts).
+parked_run_observe() {
+  local task=$1 win=$2 threshold=$3 rec="$STATE/.parked-run-$1" statusf="$STATE/$1.status"
+  local r_run='' r_step='' r_last=0 r_state=idle r_alerted=0 run step alerted=0
+  local dur reason findings=''
+  run=${FM_PARKED_RUN:--}; step=$FM_PARKED_STEP
+  if [ -f "$rec" ] && [ ! -L "$rec" ]; then
+    IFS=$'\t' read -r r_run r_step r_last r_state r_alerted < "$rec" 2>/dev/null || true
+  fi
+  case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
+  if [ "$r_run" = "$run" ] && [ "$r_step" = "$step" ] \
+    && [ "$r_state" = active ] && [ "$FM_PARKED_SECS" -ge "$r_last" ]; then
+    [ "$r_alerted" = 1 ] && alerted=1
+  fi
+  if [ "$alerted" -eq 0 ] && [ "$FM_PARKED_SECS" -ge "$threshold" ]; then
+    if status_is_captain_held "$(status_declared_wait_line "$statusf")"; then
+      triage_log "absorbed parked run (verified captain-held transfer): $task"
+    elif [ -n "$FM_PARKED_HUMAN" ] && [ "$run" != - ] && status_has_open_needs_decision "$statusf" "$run"; then
+      triage_log "absorbed parked run (its ask-user decision is already open with firstmate): $task"
+    else
+      dur=$(parked_run_fmt_secs "$FM_PARKED_SECS")
+      if [ -n "$FM_PARKED_FINDINGS" ]; then
+        if [ "$FM_PARKED_FINDINGS" = 1 ]; then findings=", 1 finding"; else findings=", $FM_PARKED_FINDINGS findings"; fi
+      fi
+      reason="stale: $win (task $task: no-mistakes run parked on worker $dur at $step$findings)"
+      fm_wake_append stale "$win" "$reason" || exit 1
+      parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active 1
+      wake "$reason"
+    fi
+  fi
+  parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active "$alerted"
+}
+
+parked_run_tick() {
+  local threshold meta kind task win marker due age line state src reads=0 rec
+  local r_run='' r_step=''
+  local -a candidates=()
+  threshold=$(parked_run_threshold)
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
+    case "$kind" in scout|secondmate) continue ;; esac
+    task=${meta##*/}
+    task=${task%.meta}
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    win=$(fm_backend_target_of_meta "$meta")
+    [ -n "$win" ] || continue
+    marker="$STATE/.parked-run-check-$task"
+    due=$(cat "$marker" 2>/dev/null || true)
+    case "$due" in ''|*[!0-9]*) due=$PARKED_RUN_CHECK_SECS ;; esac
+    age=$(age_of "$marker")
+    [ "$age" -ge "$due" ] || continue
+    candidates+=("$((due - age))"$'\t'"$task")
+  done
+  [ "${#candidates[@]}" -gt 0 ] || return 0
+  while IFS=$'\t' read -r _ task; do
+    [ "$reads" -lt "$PARKED_RUN_READS_PER_POLL" ] || break
+    win=$(fm_backend_target_of_meta "$STATE/$task.meta")
+    [ -n "$win" ] || continue
+    marker="$STATE/.parked-run-check-$task"
+    reads=$((reads + 1))
+    line=$(FM_CREW_STATE_RUN_ONLY=1 FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+    rec="$STATE/.parked-run-$task"
+    state=''; src=''
+    case "$line" in
+      state:*)
+        state=${line#state: }; state=${state%% *}
+        src=${line#*source: }; src=${src%% *}
+        ;;
+    esac
+    printf '%s' "$PARKED_RUN_CHECK_SECS" > "$marker"
+    if fm_parked_run_parse "$line"; then
+      parked_run_observe "$task" "$win" "$threshold"
+    elif [ "$src" = run-step ] && [ -f "$rec" ] && [ ! -L "$rec" ]; then
+      case "$state" in
+        working|done|failed)
+          r_run=''; r_step=''
+          IFS=$'\t' read -r r_run r_step < "$rec" 2>/dev/null || true
+          r_step=${r_step%%$'\t'*}
+          parked_run_record_write "$task" "$r_run" "$r_step" 0 idle 0
+          ;;
+      esac
+    fi
+  done < <(printf '%s\n' "${candidates[@]}" | LC_ALL=C sort -k1,1n -k2,2)
+  return 0
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2749,6 +2918,10 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+
+  # A run parked on its worker is quiet on every pane and status path, so it is
+  # read from the run itself on its own bounded cadence (parked_run_tick).
+  parked_run_tick
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
