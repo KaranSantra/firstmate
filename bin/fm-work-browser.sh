@@ -97,9 +97,11 @@ work_browser_running() {
 # the Browser field, so the whole body is the signal. Anything that answers
 # without the marker is visible: a worker page in that browser pops on screen.
 work_browser_visibility() {
-  local body url
+  local body url status
   url=$(work_browser_url) || return 1
-  body=$(curl -fsS --max-time 3 "$url/json/version" 2>/dev/null) || return 1
+  status=0
+  body=$(curl -fsS --max-time 3 "$url/json/version" 2>/dev/null) || status=$?
+  [ "$status" -eq 0 ] || return "$status"
   [ -n "$body" ] || return 1
   case "$body" in
     *HeadlessChrome*) printf '%s\n' hidden ;;
@@ -107,19 +109,23 @@ work_browser_visibility() {
   esac
 }
 
-# Refuse to open a worker page unless the running browser is hidden. A browser
-# that is up but whose visibility cannot be read is treated as visible: the
-# failure mode this exists to prevent is a page appearing on screen.
+# Open a worker page only when /json/version confirms the browser is hidden.
+# A timeout or any other unreadable read refuses and names hide. Nothing
+# listening is not a visible browser, and it still does not open.
 work_browser_require_hidden() {
-  local vis
-  if ! work_browser_running; then
+  local vis status url
+  status=0
+  vis=$(work_browser_visibility) || status=$?
+  if [ "$status" -eq 0 ] && [ "$vis" = hidden ]; then
     return 0
   fi
-  vis=$(work_browser_visibility) || vis=visible
-  if [ "$vis" != hidden ]; then
-    echo "error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
+  if [ "$status" -eq 7 ]; then
+    url=$(work_browser_url) || return 1
+    echo "error: the work browser is not answering at $url; start it with bin/fm-work-browser.sh start" >&2
     return 1
   fi
+  echo "error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
+  return 1
 }
 
 launch() {  # <headed|headless>

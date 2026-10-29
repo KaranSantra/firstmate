@@ -32,7 +32,10 @@ function arg(name, fallback) {
 const port = Number(arg('--port', '0'));
 const mode = arg('--mode', 'hidden');
 const logPath = arg('--log', '');
+const hangFirst = arg('--hang-first', '0') === '1';
+const visibleAfter = Number(arg('--visible-after', '0'));
 const raw = arg('--compartments', '');
+let versionHits = 0;
 const contexts = raw.split(',').map(s => s.trim()).filter(Boolean).map((spec, i) => {
   if (spec.startsWith('title:')) {
     const title = spec.slice('title:'.length);
@@ -141,8 +144,17 @@ const server = http.createServer((req, res) => {
     res.end('missing');
     return;
   }
-  const hidden = mode === 'hidden';
+  versionHits += 1;
+  if (hangFirst && versionHits === 1) {
+    log('http hang /json/version');
+    req.on('error', () => {});
+    res.on('error', () => {});
+    req.socket.on('error', () => {});
+    return;
+  }
+  const hidden = visibleAfter > 0 ? versionHits <= visibleAfter : mode === 'hidden';
   const product = hidden ? 'HeadlessChrome/1.2.3' : 'Chrome/1.2.3';
+  log(`version ${hidden ? 'hidden' : 'visible'}`);
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify({
     Browser: 'Chrome/1.2.3',
@@ -150,6 +162,8 @@ const server = http.createServer((req, res) => {
     webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/fake`,
   }));
 });
+
+server.on('clientError', () => {});
 
 server.on('upgrade', (req, socket) => {
   const key = req.headers['sec-websocket-key'] || '';
@@ -251,6 +265,35 @@ start_fake() {
   fail "fake browser did not answer on port $port"
 }
 
+# Like start_fake, but does not read /json/version. A probe would consume the
+# first version response, which these cases need compartment-open to see.
+start_fake_quiet() {
+  local mode=$1 port log i
+  shift
+  port=$(free_port)
+  case "$port" in
+    ''|9222|9333) fail "refusing fake browser port '$port'" ;;
+  esac
+  log="$TMP_ROOT/server-$port.log"
+  : > "$log"
+  node "$FAKE" --port "$port" --mode "$mode" --log "$log" --compartments "" \
+    "$@" \
+    --remote-debugging-port="$port" --fm-wb-test-token="$TOKEN" &
+  PIDS+=("$!")
+  FAKE_PORT=$port
+  FAKE_LOG=$log
+  printf '%s\n' "$port" > "$HOME_DIR/config/work-browser-port"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if node -e 'const n=require("net"); const s=n.connect({port:Number(process.argv[1]),host:"127.0.0.1"},()=>{s.end();process.exit(0)}); s.on("error",()=>process.exit(1)); setTimeout(()=>process.exit(1),200);' "$port"; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "fake browser did not listen on port $port"
+}
+
 WB() {
   [ -n "${FAKE_PORT:-}" ] || fail "refusing to call the work browser without a fake port"
   case "$FAKE_PORT" in
@@ -313,6 +356,58 @@ test_compartment_open_refuses_while_visible_and_allows_hidden() {
   assert_contains "$(cat "$FAKE_LOG")" "createTarget" \
     "a hidden browser did not reach page creation: $(cat "$FAKE_LOG")"
   pass "fm-work-browser.sh: compartment-open refuses a visible browser and still opens a hidden one"
+}
+
+test_compartment_open_refuses_when_version_times_out_and_then_answers_visible() {
+  local out status
+  start_fake_quiet visible --hang-first 1
+  status=0
+  out=$(WB compartment-open worker-alpha example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "compartment-open opened after a timed-out version read: $out"
+  assert_contains "$out" "bin/fm-work-browser.sh hide" \
+    "a timed-out version read did not name hide: $out"
+  assert_contains "$(cat "$FAKE_LOG")" "http hang /json/version" \
+    "the first version read was not the hung one: $(cat "$FAKE_LOG")"
+  assert_not_contains "$(cat "$FAKE_LOG")" "version visible" \
+    "compartment-open used the version read that recovered as visible: $(cat "$FAKE_LOG")"
+  assert_not_contains "$(cat "$FAKE_LOG")" "createTarget" \
+    "a timed-out version read still opened a worker page: $(cat "$FAKE_LOG")"
+  pass "fm-work-browser.sh: compartment-open refuses when /json/version times out, even if it then answers visible"
+}
+
+test_compartment_open_refuses_when_its_own_version_read_is_visible() {
+  local out status
+  # The shell's read is hidden. The read the open uses to connect is the next one, and it is visible.
+  start_fake_quiet hidden --visible-after 1
+  status=0
+  out=$(WB compartment-open worker-alpha example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "compartment-open created a page after a visible version read: $out"
+  assert_contains "$out" "bin/fm-work-browser.sh hide" \
+    "a visible version read on open did not name hide: $out"
+  assert_contains "$(cat "$FAKE_LOG")" "version visible" \
+    "the open was not offered a visible browser: $(cat "$FAKE_LOG")"
+  assert_contains "$(cat "$FAKE_LOG")" "ws open" \
+    "the open did not connect on the visible read: $(cat "$FAKE_LOG")"
+  assert_not_contains "$(cat "$FAKE_LOG")" "createTarget" \
+    "a visible version read still opened a worker page: $(cat "$FAKE_LOG")"
+  pass "fm-work-browser.sh: compartment-open does not create a page unless the read it connects with is hidden"
+}
+
+test_compartment_open_refuses_when_nothing_is_listening_without_calling_it_visible() {
+  local out status port
+  port=$(free_port)
+  case "$port" in
+    ''|9222|9333) fail "refusing unused port '$port'" ;;
+  esac
+  FAKE_PORT=$port
+  printf '%s\n' "$port" > "$HOME_DIR/config/work-browser-port"
+  status=0
+  out=$(WB compartment-open worker-alpha example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "compartment-open succeeded with nothing listening: $out"
+  assert_not_contains "$out" "visible" "a missing browser was described as visible: $out"
+  assert_not_contains "$out" "hide" "a missing browser was told to hide: $out"
+  assert_contains "$out" "not answering" "a missing browser did not say it is not answering: $out"
+  pass "fm-work-browser.sh: compartment-open refuses a missing browser without calling it visible"
 }
 
 test_start_on_a_visible_browser_names_hide() {
@@ -422,6 +517,9 @@ test_sign_in_and_usage_say_to_hide_before_a_worker_gets_a_page() {
 
 test_status_reports_hidden_and_visible
 test_compartment_open_refuses_while_visible_and_allows_hidden
+test_compartment_open_refuses_when_version_times_out_and_then_answers_visible
+test_compartment_open_refuses_when_its_own_version_read_is_visible
+test_compartment_open_refuses_when_nothing_is_listening_without_calling_it_visible
 test_start_on_a_visible_browser_names_hide
 test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running
 test_hide_refuses_while_a_worker_compartment_is_open_and_names_it

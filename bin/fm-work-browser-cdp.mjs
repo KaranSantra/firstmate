@@ -30,11 +30,17 @@ function die(msg) {
   process.exit(1);
 }
 
+function versionConfirmsHidden(body) {
+  return typeof body === 'string' && body.includes('HeadlessChrome');
+}
+
 async function connect(baseUrl) {
   let version;
+  let versionBody = '';
   try {
     const res = await fetch(`${baseUrl}/json/version`, { signal: AbortSignal.timeout(5000) });
-    version = await res.json();
+    versionBody = await res.text();
+    version = JSON.parse(versionBody);
   } catch {
     die(`the work browser is not answering at ${baseUrl}; start it with bin/fm-work-browser.sh start`);
   }
@@ -54,7 +60,7 @@ async function connect(baseUrl) {
     pending.set(mid, m => (m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result)));
     ws.send(JSON.stringify({ id: mid, method, params }));
   });
-  return { ws, send };
+  return { ws, send, versionBody };
 }
 
 // A cookie belongs to an allowlisted site when its domain is that site or any
@@ -92,7 +98,11 @@ if (op === 'open') {
   const sites = allowlist.split(',').map(s => s.trim().replace(/^\./, '').toLowerCase()).filter(Boolean);
   if (!sites.length) die('open needs at least one site in the allowlist');
 
-  const { ws, send } = await connect(base);
+  const { ws, send, versionBody } = await connect(base);
+  if (!versionConfirmsHidden(versionBody)) {
+    ws.close();
+    die('the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page');
+  }
   const { browserContextId } = await send('Target.createBrowserContext', {});
   const shared = await send('Storage.getCookies', {});
   const give = shared.cookies.filter(c => cookieAllowed(c.domain, sites));
