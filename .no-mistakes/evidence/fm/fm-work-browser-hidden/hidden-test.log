@@ -1,0 +1,31 @@
+port=63755
+port=63763
+ok - fm-work-browser.sh: status reports hidden or visible from the HeadlessChrome marker
+port=63770
+port=63774
+ok - fm-work-browser.sh: compartment-open refuses a visible browser and still opens a hidden one
+port=63780
+ok - fm-work-browser.sh: compartment-open refuses when /json/version times out, even if it then answers visible
+port=63787
+ok - fm-work-browser.sh: compartment-open does not create a page unless the read it connects with is hidden
+port=63793
+ok - fm-work-browser.sh: compartment-open does not create a page when the read it connects with is empty
+ok - fm-work-browser.sh: compartment-open refuses a missing browser without calling it visible
+port=63800
+port=63805
+ok - fm-work-browser.sh: start names hide when the browser is already visible
+port=63810
+ok - fm-work-browser.sh: start says the read failed rather than calling an unreadable browser visible
+port=63815
+ok - fm-work-browser.sh: hide does nothing when already hidden and does not launch when stopped
+port=63823
+ok - fm-work-browser.sh: hide refuses while a worker compartment is open and lists its context id
+port=63831
+ok - fm-work-browser.sh: hide restarts a visible browser headless and keeps session restore
+port=63849
+ok - fm-work-browser.sh: sign-in restarts a hidden browser visible and says to run hide after
+port=63869
+ok - fm-work-browser.sh: sign-in refuses to restart a hidden browser while a worker compartment is open
+port=63877
+ok - fm-work-browser.sh: sign-in refuses when it cannot tell whether the browser is hidden
+# all fm-work-browser-hidden tests passed

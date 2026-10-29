@@ -1,0 +1,15 @@
+ok - fm-spawn.sh: --chrome grants the captain's browser on the claude launch
+ok - fm-spawn.sh: a default spawn closes the browser explicitly rather than inheriting machine config
+ok - fm-spawn.sh: the browser grant is recorded and a relaunch reuses rather than re-decides it
+ok - fm-spawn.sh: an ordinary task record carries no chrome= line
+ok - fm-spawn.sh: a non-claude harness refuses --chrome instead of launching a browserless worker
+ok - fm-spawn.sh: a clean grant wires a unique session and an explicit out-of-range port into the launch
+ok - fm-spawn.sh: a work grant refuses rather than launching a worker with no compartment
+ok - fm-spawn.sh: a work grant against a visible browser points at hide
+ok - fm-spawn.sh: a work grant requires an explicit site allowlist and refuses it elsewhere
+ok - fm-spawn.sh: concurrent browser workers are allocated distinct ports
+ok - fm-spawn.sh: the browser-worker cap refuses rather than overloading the machine
+ok - fm-spawn.sh: a worker with no grant carries no browser environment
+ok - fm-spawn.sh: --chrome and --browser cannot be combined
+ok - fm-spawn.sh: a relaunch reuses the recorded grant and port instead of re-deciding them
+# all fm-spawn-chrome tests passed

@@ -1,0 +1,186 @@
+=== LAB=/var/folders/hn/_g5l2mlj5wd4rts8_791kjf00000gn/T//fm-wb-live.bb81Xj PORT=9457 ===
+
+=== SCENARIO 1: start headless, status hidden, compartment-open succeeds ===
+start: work browser up on port 9457 (headless)
+status: work browser: running on http://127.0.0.1:9457 (hidden)
+pages=1
+contexts=1
+version UA marker present: 1
+compartment-open: context=263968BE0EAC0FE393725144E204DA1E
+target=627BBCAE0E9EAFA88124C7697440312C
+cookies=0
+sites=example.com
+warning: the work browser holds no cookies for example.com; this compartment will be signed out. To sign it in, close this compartment first with bin/fm-work-browser.sh compartment-close 263968BE0EAC0FE393725144E204DA1E (or exit this worker), then run bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide, then start the worker again.
+PASS scenario 1
+
+=== SCENARIO 2: sign-in makes visible; compartment-open must REFUSE (blank-tab guard) ===
+sign-in: work browser up on port 9457 (headed)
+Sign in to the work sites in the work browser window. Once the owner has signed in, run hide before any worker gets a page.
+  bin/fm-work-browser.sh hide
+A visible browser puts each later worker page on screen. hide restarts it headless and keeps its sessions, which live in /var/folders/hn/_g5l2mlj5wd4rts8_791kjf00000gn/T//fm-wb-live.bb81Xj/profile and survive because every launch passes --restore-last-session.
+status: work browser: running on http://127.0.0.1:9457 (visible)
+pages=1
+contexts=1
+compartment-open rc=1 out=error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page
+pages after refuse: [ {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/FFCF62643E34A7915FA4A3C0DCA4DFB3",
+   "id": "FFCF62643E34A7915FA4A3C0DCA4DFB3",
+   "title": "Omnibox Popup",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/FFCF62643E34A7915FA4A3C0DCA4DFB3"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/B29D0252A976F98BD0D1014D2F09ACE4",
+   "id": "B29D0252A976F98BD0D1014D2F09ACE4",
+   "title": "New tab",
+   "type": "page",
+   "url": "chrome://newtab/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/B29D0252A976F98BD0D1014D2F09ACE4"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/2A9C4B26C904DABFC45DA340AE44C92B",
+   "id": "2A9C4B26C904DABFC45DA340AE44C92B",
+   "parentId": "B29D0252A976F98BD0D1014D2F09ACE4",
+   "title": "chrome-untrusted://new-tab-page/one-google-bar?paramsencoded=",
+   "type": "iframe",
+   "url": "chrome-untrusted://new-tab-page/one-google-bar?paramsencoded=",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/2A9C4B26C904DABFC45DA340AE44C92B"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/763AA9F8C14BFBB31BC53A0D60DDF0F5",
+   "id": "763AA9F8C14BFBB31BC53A0D60DDF0F5",
+   "title": "chrome://webui-toolbar.top-chrome",
+   "type": "browser_ui",
+   "url": "chrome://webui-toolbar.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/763AA9F8C14BFBB31BC53A0D60DDF0F5"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/F8C33F7910A0E22957D4F38C055A4BAD",
+   "id": "F8C33F7910A0E22957D4F38C055A4BAD",
+   "title": "Omnibox Popup",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/F8C33F7910A0E22957D4F38C055A4BAD"
+} ]
+PASS scenario 2
+
+=== SCENARIO 3: start on already-visible names hide, leaves running ===
+start rc=0 out=the work browser is already running on port 9457, and it is visible; hide it with bin/fm-work-browser.sh hide before any worker gets a page
+status still: work browser: running on http://127.0.0.1:9457 (visible)
+pages=1
+contexts=1
+PASS scenario 3
+
+=== SCENARIO 4: second sign-in on already-visible prints one-line advice, no hide-now advisory ===
+sign-in2 rc=0 out=the work browser is already visible on port 9457; sign in there, then run hide
+PASS scenario 4
+
+=== SCENARIO 5: hide restarts headless; compartment-open then succeeds ===
+hide: work browser stopped
+work browser up on port 9457 (headless)
+work browser is hidden; its sessions were kept because every launch passes --restore-last-session
+status: work browser: running on http://127.0.0.1:9457 (hidden)
+pages=1
+contexts=1
+compartment-open after hide: context=959EEFD1B54229C00417645B3DC4E262
+target=E6AA565515BB24DAE1A7A9EA02DA6707
+cookies=0
+sites=example.com
+warning: the work browser holds no cookies for example.com; this compartment will be signed out. To sign it in, close this compartment first with bin/fm-work-browser.sh compartment-close 959EEFD1B54229C00417645B3DC4E262 (or exit this worker), then run bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide, then start the worker again.
+pages after open (headless): [ {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/92044EB93F15DA507697C9F5213AF9EF",
+   "id": "92044EB93F15DA507697C9F5213AF9EF",
+   "title": "",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/92044EB93F15DA507697C9F5213AF9EF"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/E6AA565515BB24DAE1A7A9EA02DA6707",
+   "id": "E6AA565515BB24DAE1A7A9EA02DA6707",
+   "title": "",
+   "type": "page",
+   "url": "",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/E6AA565515BB24DAE1A7A9EA02DA6707"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/9746DC8BC9BD03AAEBE52FB4ECC0ED95",
+   "id": "9746DC8BC9BD03AAEBE52FB4ECC0ED95",
+   "title": "chrome://webui-toolbar.top-chrome",
+   "type": "browser_ui",
+   "url": "chrome://webui-toolbar.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/9746DC8BC9BD03AAEBE52FB4ECC0ED95"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/3FEFC13B12CBA5940CC886FE077AC1FA",
+   "id": "3FEFC13B12CBA5940CC886FE077AC1FA",
+   "title": "",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/3FEFC13B12CBA5940CC886FE077AC1FA"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/6DF4EDA155F8A4FD679665E75E594C40",
+   "id": "6DF4EDA155F8A4FD679665E75E594C40",
+   "title": "Omnibox Popup",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/6DF4EDA155F8A4FD679665E75E594C40"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/D55FD9E45A86F66DE496367BAFD61A3A",
+   "id": "D55FD9E45A86F66DE496367BAFD61A3A",
+   "title": "New tab",
+   "type": "page",
+   "url": "chrome://newtab/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/D55FD9E45A86F66DE496367BAFD61A3A"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/A7DDF346C173A02C5CC33AA17CA940CF",
+   "id": "A7DDF346C173A02C5CC33AA17CA940CF",
+   "parentId": "D55FD9E45A86F66DE496367BAFD61A3A",
+   "title": "chrome-untrusted://new-tab-page/one-google-bar?paramsencoded=",
+   "type": "iframe",
+   "url": "chrome-untrusted://new-tab-page/one-google-bar?paramsencoded=",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/A7DDF346C173A02C5CC33AA17CA940CF"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/5A71A6E855BDFC904D6517B2CFEC3AE8",
+   "id": "5A71A6E855BDFC904D6517B2CFEC3AE8",
+   "title": "chrome://webui-toolbar.top-chrome",
+   "type": "browser_ui",
+   "url": "chrome://webui-toolbar.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/5A71A6E855BDFC904D6517B2CFEC3AE8"
+}, {
+   "description": "",
+   "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@334b65d254ccc35df4fca82706d1753227b01039/inspector.html?ws=127.0.0.1:9457/devtools/page/25F5BF0429268C074970EAD0D32A5EE4",
+   "id": "25F5BF0429268C074970EAD0D32A5EE4",
+   "title": "Omnibox Popup",
+   "type": "browser_ui",
+   "url": "chrome://omnibox-popup.top-chrome/",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9457/devtools/page/25F5BF0429268C074970EAD0D32A5EE4"
+} ]
+PASS scenario 5
+
+=== SCENARIO 6: hide refuses while compartment open ===
+pre: work browser: running on http://127.0.0.1:9457 (hidden)
+pages=1
+contexts=1
+sign-in with compartment rc=1 out=error: cannot restart the work browser visible for sign-in while a worker compartment is open, because a restart closes those pages:
+3DF4EDE3B507A8B3EE06D0AF86A0844D
+close each one first with bin/fm-work-browser.sh compartment-close <context-id> (or exit that worker), then run bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide, then start the worker again
+PASS scenario 6 (sign-in refuses restart while compartment open)
+
+=== ALL LIVE MANUAL SCENARIOS PASSED ===
+work browser stopped
+=== CDP dual guard: open via cdp.mjs against visible browser ===
+status: work browser: running on http://127.0.0.1:9458 (visible)
+pages=1
+contexts=1
+cdp open rc=1 out=error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page
+no worker page created
+PASS cdp dual guard
+work browser stopped

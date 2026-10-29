@@ -1,0 +1,8 @@
+ok - fm-work-browser.sh: starts headless and reports status as hidden
+ok - fm-work-browser.sh: stop confirms the browser is really gone before reporting success
+ok - fm-work-browser.sh: a compartment holds only the allowlisted sites
+ok - fm-work-browser.sh: a sealed compartment cannot see later shared-jar logins
+ok - fm-work-browser.sh: closing a compartment is idempotent, so an interrupted teardown can retry
+ok - fm-work-browser.sh: the teardown sequence disposes a compartment recorded in the task record
+ok - fm-work-browser.sh: refuses the captain's own Chrome port
+# all fm-work-browser live tests passed
