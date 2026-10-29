@@ -452,24 +452,26 @@ test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running() {
   pass "fm-work-browser.sh: hide does nothing when already hidden and does not launch when stopped"
 }
 
-test_hide_refuses_while_a_worker_compartment_is_open_and_names_it() {
+test_hide_refuses_while_a_worker_compartment_is_open_and_lists_its_context_id() {
   local out status
-  # One compartment is known only by the data: URL (title not loaded yet) and
-  # one has already been navigated, so its name is the page title. The default
-  # context also has a page; it must not be named.
-  start_fake visible "worker-alpha,title:Signed-in site"
+  # One compartment still shows its starting page and one has navigated to a
+  # page titled fm-dashboard, which a title-based name would mislabel. The
+  # refusal lists both by exact context id. The default context also has a
+  # page; it must not be listed.
+  start_fake visible "worker-alpha,title:fm-dashboard"
   reset_chrome_log
   status=0
   out=$(WB hide 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "hide restarted while worker compartments were open: $out"
-  assert_contains "$out" "worker-alpha" "hide did not name the compartment known by its starting URL: $out"
-  assert_contains "$out" "Signed-in site" "hide did not name the compartment whose page had moved: $out"
+  assert_contains "$out" "CTX1" "hide did not list the first compartment's context id: $out"
+  assert_contains "$out" "CTX2" "hide did not list the navigated compartment's context id: $out"
   assert_contains "$out" "restart closes those pages" "the refusal did not say why it stopped: $out"
-  assert_not_contains "$out" "about:blank" "hide named the default page as a worker compartment: $out"
+  assert_not_contains "$out" "dashboard" "hide labelled a compartment from its page title: $out"
+  assert_not_contains "$out" "DEFAULT" "hide listed the default context as a worker compartment: $out"
   chrome_was_launched && fail "hide launched Chrome while refusing: $(cat "$CHROME_LOG")"
   curl -sf --max-time 2 "http://127.0.0.1:$FAKE_PORT/json/version" >/dev/null \
     || fail "hide stopped the browser while a worker compartment was open"
-  pass "fm-work-browser.sh: hide refuses while a worker compartment is open and names it"
+  pass "fm-work-browser.sh: hide refuses while a worker compartment is open and lists its context id"
 }
 
 test_hide_restarts_a_visible_browser_hidden_and_keeps_the_session_flag() {
@@ -522,7 +524,7 @@ test_compartment_open_refuses_when_its_own_version_read_is_visible
 test_compartment_open_refuses_when_nothing_is_listening_without_calling_it_visible
 test_start_on_a_visible_browser_names_hide
 test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running
-test_hide_refuses_while_a_worker_compartment_is_open_and_names_it
+test_hide_refuses_while_a_worker_compartment_is_open_and_lists_its_context_id
 test_hide_restarts_a_visible_browser_hidden_and_keeps_the_session_flag
 test_sign_in_and_usage_say_to_hide_before_a_worker_gets_a_page
 printf '%s\n' "# all fm-work-browser-hidden tests passed"

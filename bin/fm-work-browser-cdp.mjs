@@ -71,27 +71,6 @@ function cookieAllowed(domain, sites) {
   return sites.some(s => d === s || d.endsWith(`.${s}`));
 }
 
-// A worker compartment is a context this fleet created, not the default one.
-// Current Chrome gives the default context an id too, so "any browserContextId"
-// is not a compartment. Target.getBrowserContexts.browserContextIds is the list
-// of created contexts. Name each one by its task id when the starting page still
-// carries it (title fm-<task>, or that title embedded in the data: URL before
-// the page has loaded), otherwise by the page title, otherwise by the context id.
-function compartmentName(pages, contextId) {
-  for (const page of pages) {
-    const title = page.title || '';
-    if (/^fm-.+/.test(title)) return title.slice(3);
-  }
-  for (const page of pages) {
-    const match = (page.url || '').match(/<title>fm-([^<]+)<\/title>/);
-    if (match && match[1]) return match[1];
-  }
-  for (const page of pages) {
-    if (page.title) return page.title;
-  }
-  return contextId;
-}
-
 if (op === 'open') {
   const [taskId, allowlist] = rest;
   if (!taskId || !allowlist) die('open needs <task-id> <comma-separated-sites>');
@@ -139,18 +118,17 @@ if (op === 'open') {
   }
   ws.close();
 } else if (op === 'compartments') {
+  // A worker compartment is a context this fleet created, not the default one.
+  // Current Chrome gives the default context an id too, so "any browserContextId"
+  // is not a compartment. Target.getBrowserContexts.browserContextIds is the list
+  // of created contexts, reported here by their exact ids.
   const { ws, send } = await connect(base);
   const listed = await send('Target.getBrowserContexts', {});
   if (!Array.isArray(listed.browserContextIds)) {
     ws.close();
     die('the work browser did not report its compartments; refusing to treat that as none open');
   }
-  const targets = await send('Target.getTargets', {});
-  const pages = (targets.targetInfos || []).filter(t => t.type === 'page');
-  for (const contextId of listed.browserContextIds) {
-    const own = pages.filter(p => p.browserContextId === contextId);
-    process.stdout.write(`${compartmentName(own, contextId)}\n`);
-  }
+  for (const contextId of listed.browserContextIds) process.stdout.write(`${contextId}\n`);
   ws.close();
 } else if (op === 'status') {
   const { ws, send } = await connect(base);

@@ -22,7 +22,7 @@
 #   hide      restart a visible browser headless, keeping its sessions (the same
 #             stop and headless start this script already uses). Refuses while
 #             a worker compartment is open, because a restart closes those
-#             pages, and names them. Does nothing if it is already hidden.
+#             pages, and lists their context ids. Does nothing if it is already hidden.
 #   stop      close it. Sessions survive in the profile because every launch
 #             passes --restore-last-session.
 #
@@ -188,13 +188,13 @@ MSG
       echo "the work browser is already hidden; nothing to do"
       exit 0
     fi
-    # A restart closes every open page. Name the worker compartments and stop
-    # rather than dropping a worker's page. Listing failure refuses too: hiding
-    # when the list cannot be read would close pages we failed to name.
-    names=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || exit 1
-    if [ -n "$names" ]; then
+    # A restart closes every open page. List the worker compartments by context
+    # id and stop rather than dropping a worker's page. Listing failure refuses
+    # too: hiding when the list cannot be read would close pages we failed to list.
+    contexts=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || exit 1
+    if [ -n "$contexts" ]; then
       echo "error: cannot hide the work browser while a worker compartment is open, because a restart closes those pages:" >&2
-      printf '%s\n' "$names" >&2
+      printf '%s\n' "$contexts" >&2
       exit 1
     fi
     "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1

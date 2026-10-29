@@ -2453,21 +2453,10 @@ if [ -n "$BROWSER" ]; then
     # allowlisted cookies means reading the work browser's shared jar, which is
     # the privileged half of this design and stays on this side of the boundary.
     # It never reads the captain's personal Chrome.
-    # A visible work browser refuses the compartment and says to hide it.
-    # Point this error at that same fix; a browser that is simply not running
-    # keeps the status hint, because hide is not the remedy for that failure.
-    browser_err=$(mktemp "${TMPDIR:-/tmp}/fm-compartment-open.XXXXXX")
-    browser_open=$("$SCRIPT_DIR/fm-work-browser.sh" compartment-open "$ID" "$BROWSER_SITES" 2>"$browser_err") || {
-      if grep -F -q 'fm-work-browser.sh hide' "$browser_err"; then
-        echo "error: could not open a sealed browser compartment for $ID; the work browser is visible, so hide it with bin/fm-work-browser.sh hide before a worker gets a page" >&2
-      else
-        echo "error: could not open a sealed browser compartment for $ID; is the work browser running? (bin/fm-work-browser.sh status)" >&2
-      fi
-      cat "$browser_err" >&2
-      rm -f "$browser_err"
+    browser_open=$("$SCRIPT_DIR/fm-work-browser.sh" compartment-open "$ID" "$BROWSER_SITES") || {
+      echo "error: could not open a sealed browser compartment for $ID; see the reason above" >&2
       exit 1
     }
-    rm -f "$browser_err"
     BROWSER_CONTEXT=$(printf '%s\n' "$browser_open" | sed -n 's/^context=//p')
     BROWSER_TARGET=$(printf '%s\n' "$browser_open" | sed -n 's/^target=//p')
     [ -n "$BROWSER_CONTEXT" ] && [ -n "$BROWSER_TARGET" ] || {

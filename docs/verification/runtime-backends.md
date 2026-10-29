@@ -472,7 +472,7 @@ That is why the generated brief forbids `newpage` outright and tells a worker to
 Measured 2026-10-29 on Chrome 156.0.8078.73 launched with `--headless=new`, that marker is in the User-Agent (`HeadlessChrome/156.0.0.0`) and not in the Browser field (`Chrome/156.0.8078.73`), so a check of the Browser field alone would call a hidden browser visible.
 `status` prints `hidden` or `visible`.
 `compartment-open` opens a page only when `/json/version` confirms the browser is hidden. A visible answer or a timed-out or otherwise unreadable read names `hide`; nothing listening does not, because hide is not the remedy for a stopped browser.
-`hide` restarts a visible browser with the same stop and headless start, which passes `--restore-last-session`, and refuses while a worker compartment is open.
+`hide` restarts a visible browser with the same stop and headless start, which passes `--restore-last-session`, and refuses while a worker compartment is open, listing each open compartment by its context id.
 Worker compartments are the ids in `Target.getBrowserContexts` `browserContextIds`.
 On this Chrome the default context also has an id, so the presence of any `browserContextId` is not a compartment.
 `bash tests/fm-work-browser-hidden.test.sh` covers those refusals against a fake endpoint and does not launch Chrome.
