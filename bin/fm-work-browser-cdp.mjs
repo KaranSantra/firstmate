@@ -98,7 +98,9 @@ if (op === 'open') {
   if (!give.length) {
     process.stderr.write(
       `warning: the work browser holds no cookies for ${sites.join(', ')}; this compartment will be signed out. ` +
-      'Sign the work browser into that site once with bin/fm-work-browser.sh sign-in.\n');
+      'To sign it in, close this compartment first with bin/fm-work-browser.sh compartment-close ' +
+      `${browserContextId} (or exit this worker), then run bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide, ` +
+      'then start the worker again.\n');
   }
   ws.close();
 } else if (op === 'close') {

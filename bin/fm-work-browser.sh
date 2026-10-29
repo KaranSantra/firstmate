@@ -137,12 +137,13 @@ work_browser_require_hidden() {
 # A restart closes every open page. List the worker compartments by context id
 # and stop rather than dropping a worker's page. Listing failure refuses too:
 # restarting when the list cannot be read would close pages we failed to list.
-work_browser_require_no_compartments() {  # <action>
+work_browser_require_no_compartments() {  # <action> <retry-steps>
   local contexts
   contexts=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || return 1
   if [ -n "$contexts" ]; then
     echo "error: cannot $1 while a worker compartment is open, because a restart closes those pages:" >&2
     printf '%s\n' "$contexts" >&2
+    echo "close each one first with bin/fm-work-browser.sh compartment-close <context-id> (or exit that worker), then run $2, then start the worker again" >&2
     return 1
   fi
 }
@@ -197,7 +198,7 @@ case "${1:---help}" in
         exit 1
       }
       if [ "$vis" = hidden ]; then
-        work_browser_require_no_compartments "restart the work browser visible for sign-in" || exit 1
+        work_browser_require_no_compartments "restart the work browser visible for sign-in" "bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide" || exit 1
         "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
       fi
     fi
@@ -222,7 +223,7 @@ MSG
       echo "the work browser is already hidden; nothing to do"
       exit 0
     fi
-    work_browser_require_no_compartments "hide the work browser" || exit 1
+    work_browser_require_no_compartments "hide the work browser" "bin/fm-work-browser.sh hide" || exit 1
     "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
     "$SCRIPT_DIR/fm-work-browser.sh" start || exit 1
     vis=$(work_browser_visibility) || {
