@@ -560,7 +560,10 @@ test_sign_in_restarts_a_hidden_browser_visible_and_says_to_hide_after() {
 
   reset_chrome_log
   out=$(WB sign-in 2>&1) || fail "sign-in failed against an already-visible browser: $out"
-  assert_contains "$out" "already running" "a visible browser was not reported as already running: $out"
+  assert_contains "$out" "the work browser is already visible on port $FAKE_PORT; sign in there, then run hide" \
+    "sign-in did not say to sign in through the already-visible browser: $out"
+  assert_not_contains "$out" "before any worker gets a page" \
+    "sign-in let the start-oriented hide-now advisory through: $out"
   chrome_was_launched && fail "sign-in relaunched an already-visible browser: $(cat "$CHROME_LOG")"
 
   out=$("$ROOT/bin/fm-work-browser.sh" help 2>&1) || fail "help failed: $out"

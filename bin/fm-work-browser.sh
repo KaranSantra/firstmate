@@ -197,10 +197,12 @@ case "${1:---help}" in
         echo "error: could not tell whether the work browser is hidden; refusing to sign in through a window that may not exist" >&2
         exit 1
       }
-      if [ "$vis" = hidden ]; then
-        work_browser_require_no_compartments "restart the work browser visible for sign-in" "bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide" || exit 1
-        "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
+      if [ "$vis" != hidden ]; then
+        echo "the work browser is already visible on port $(work_browser_port); sign in there, then run hide"
+        exit 0
       fi
+      work_browser_require_no_compartments "restart the work browser visible for sign-in" "bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide" || exit 1
+      "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
     fi
     launch headed || exit 1
     profile=$(work_browser_profile)
