@@ -126,6 +126,10 @@ work_browser_require_hidden() {
     echo "error: the work browser is not answering at $url; start it with bin/fm-work-browser.sh start" >&2
     return 1
   fi
+  if [ "$status" -ne 0 ]; then
+    echo "error: could not confirm the work browser is hidden because its /json/version read failed, so no worker page opens; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
+    return 1
+  fi
   echo "error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
   return 1
 }
@@ -148,7 +152,10 @@ launch() {  # <headed|headless>
   port=$(work_browser_port) || return 1
   profile=$(work_browser_profile) || return 1
   if work_browser_running; then
-    vis=$(work_browser_visibility) || vis=visible
+    vis=$(work_browser_visibility) || {
+      echo "the work browser is already running on port $port, but its /json/version read failed, so whether it is hidden is unknown; check it with bin/fm-work-browser.sh status" >&2
+      return 0
+    }
     if [ "$vis" != hidden ]; then
       echo "the work browser is already running on port $port, and it is visible; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
       return 0
@@ -185,7 +192,10 @@ case "${1:---help}" in
     # A hidden browser has no window to sign in through. Restart it visible with
     # the same stop and a headed launch, which keeps its sessions.
     if work_browser_running; then
-      vis=$(work_browser_visibility) || vis=unknown
+      vis=$(work_browser_visibility) || {
+        echo "error: could not tell whether the work browser is hidden; refusing to sign in through a window that may not exist" >&2
+        exit 1
+      }
       if [ "$vis" = hidden ]; then
         work_browser_require_no_compartments "restart the work browser visible for sign-in" || exit 1
         "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1

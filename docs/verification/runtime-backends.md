@@ -473,7 +473,7 @@ Measured 2026-10-29 on Chrome 156.0.8078.73 launched with `--headless=new`, that
 `status` prints `hidden`, `visible`, or `unknown` when the browser answers but its `/json/version` read fails.
 `compartment-open` opens a page only when `/json/version` confirms the browser is hidden. A visible answer or a timed-out or otherwise unreadable read names `hide`; nothing listening does not, because hide is not the remedy for a stopped browser.
 `hide` restarts a visible browser with the same stop and headless start, which passes `--restore-last-session`, and refuses while a worker compartment is open, listing each open compartment by its context id.
-`sign-in` on a hidden browser restarts it visible the same way, with a headed launch, and refuses on the same open compartments.
+`sign-in` on a hidden browser restarts it visible the same way, with a headed launch, and refuses on the same open compartments; when it cannot read whether the browser is hidden it refuses rather than claim a window exists.
 Worker compartments are the ids in `Target.getBrowserContexts` `browserContextIds`.
 On this Chrome the default context also has an id, so the presence of any `browserContextId` is not a compartment.
 `bash tests/fm-work-browser-hidden.test.sh` covers those refusals against a fake endpoint and does not launch Chrome.

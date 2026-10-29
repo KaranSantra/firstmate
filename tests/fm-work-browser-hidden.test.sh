@@ -34,6 +34,7 @@ const mode = arg('--mode', 'hidden');
 const logPath = arg('--log', '');
 const hangFirst = arg('--hang-first', '0') === '1';
 const visibleAfter = Number(arg('--visible-after', '0'));
+const emptyFrom = Number(arg('--empty-from', '0'));
 const raw = arg('--compartments', '');
 let versionHits = 0;
 const contexts = raw.split(',').map(s => s.trim()).filter(Boolean).map((spec, i) => {
@@ -150,6 +151,11 @@ const server = http.createServer((req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
     req.socket.on('error', () => {});
+    return;
+  }
+  if (emptyFrom > 0 && versionHits >= emptyFrom) {
+    log('version empty');
+    res.end();
     return;
   }
   const hidden = visibleAfter > 0 ? versionHits <= visibleAfter : mode === 'hidden';
@@ -393,6 +399,23 @@ test_compartment_open_refuses_when_its_own_version_read_is_visible() {
   pass "fm-work-browser.sh: compartment-open does not create a page unless the read it connects with is hidden"
 }
 
+test_compartment_open_refuses_when_its_own_version_read_is_empty() {
+  local out status
+  # The shell's read is hidden. The read the open uses to connect is the next one, and it is empty.
+  start_fake_quiet hidden --empty-from 2
+  status=0
+  out=$(WB compartment-open worker-alpha example.com 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "compartment-open created a page after an empty version read: $out"
+  assert_contains "$out" "bin/fm-work-browser.sh hide" \
+    "an empty version read on open did not name hide: $out"
+  assert_not_contains "$out" "start it" "an empty version read on open was called not running: $out"
+  assert_contains "$(cat "$FAKE_LOG")" "version empty" \
+    "the open was not offered an empty version read: $(cat "$FAKE_LOG")"
+  assert_not_contains "$(cat "$FAKE_LOG")" "createTarget" \
+    "an empty version read still opened a worker page: $(cat "$FAKE_LOG")"
+  pass "fm-work-browser.sh: compartment-open does not create a page when the read it connects with is empty"
+}
+
 test_compartment_open_refuses_when_nothing_is_listening_without_calling_it_visible() {
   local out status port
   port=$(free_port)
@@ -426,6 +449,18 @@ test_start_on_a_visible_browser_names_hide() {
   assert_not_contains "$out" "it is visible" "a hidden browser was called visible: $out"
   chrome_was_launched && fail "start relaunched an already-hidden browser: $(cat "$CHROME_LOG")"
   pass "fm-work-browser.sh: start names hide when the browser is already visible"
+}
+
+test_start_says_the_read_failed_when_visibility_is_unreadable() {
+  local out
+  # The running probe answers; the visibility read after it is empty.
+  start_fake_quiet hidden --empty-from 2
+  reset_chrome_log
+  out=$(WB start 2>&1) || fail "start failed on a running browser with an unreadable version: $out"
+  assert_contains "$out" "read failed" "start did not say the version read failed: $out"
+  assert_not_contains "$out" "it is visible" "an unreadable version read was called visible: $out"
+  chrome_was_launched && fail "start launched Chrome over a running browser: $(cat "$CHROME_LOG")"
+  pass "fm-work-browser.sh: start says the read failed rather than calling an unreadable browser visible"
 }
 
 test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running() {
@@ -553,15 +588,36 @@ test_sign_in_refuses_to_restart_a_hidden_browser_while_a_worker_compartment_is_o
   pass "fm-work-browser.sh: sign-in refuses to restart a hidden browser while a worker compartment is open"
 }
 
+test_sign_in_refuses_when_it_cannot_tell_whether_the_browser_is_hidden() {
+  local out status
+  # The running probe answers; the visibility read after it is empty.
+  start_fake_quiet hidden --empty-from 2
+  reset_chrome_log
+  CHROME_BIN_OVERRIDE=$RESTART_CHROME
+  status=0
+  out=$(WB sign-in 2>&1) || status=$?
+  CHROME_BIN_OVERRIDE=
+  [ "$status" -eq 1 ] || fail "sign-in did not exit 1 when visibility was unreadable (status $status): $out"
+  assert_contains "$out" "could not tell whether the work browser is hidden" \
+    "sign-in did not say it could not tell: $out"
+  assert_not_contains "$out" "work browser window" "sign-in claimed a window exists: $out"
+  assert_not_contains "$(cat "$FAKE_LOG")" "method" "sign-in touched the browser while refusing: $(cat "$FAKE_LOG")"
+  chrome_was_launched && fail "sign-in launched Chrome while refusing: $(cat "$CHROME_LOG")"
+  pass "fm-work-browser.sh: sign-in refuses when it cannot tell whether the browser is hidden"
+}
+
 test_status_reports_hidden_and_visible
 test_compartment_open_refuses_while_visible_and_allows_hidden
 test_compartment_open_refuses_when_version_times_out_and_then_answers_visible
 test_compartment_open_refuses_when_its_own_version_read_is_visible
+test_compartment_open_refuses_when_its_own_version_read_is_empty
 test_compartment_open_refuses_when_nothing_is_listening_without_calling_it_visible
 test_start_on_a_visible_browser_names_hide
+test_start_says_the_read_failed_when_visibility_is_unreadable
 test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running
 test_hide_refuses_while_a_worker_compartment_is_open_and_lists_its_context_id
 test_hide_restarts_a_visible_browser_hidden_and_keeps_the_session_flag
 test_sign_in_restarts_a_hidden_browser_visible_and_says_to_hide_after
 test_sign_in_refuses_to_restart_a_hidden_browser_while_a_worker_compartment_is_open
+test_sign_in_refuses_when_it_cannot_tell_whether_the_browser_is_hidden
 printf '%s\n' "# all fm-work-browser-hidden tests passed"
