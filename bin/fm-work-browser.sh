@@ -3,7 +3,7 @@
 # each worker gets its own sealed compartment holding only the sites that worker
 # needs.
 #
-# Usage: fm-work-browser.sh start|sign-in|status|stop|url
+# Usage: fm-work-browser.sh start|sign-in|hide|status|stop|url
 #        fm-work-browser.sh compartment-open <task-id> <site>[,<site>...]
 #        fm-work-browser.sh compartment-close <context-id>
 #
@@ -14,10 +14,15 @@
 #
 #   start     launch it headless and leave it running. Headless because opening
 #             a compartment pops a window in a VISIBLE browser, which would
-#             interrupt whoever is looking at it.
+#             interrupt whoever is looking at it. If it is already running and
+#             visible, start names hide instead of leaving it on screen.
 #   sign-in   launch it headed, once, so the captain can sign into the work
 #             sites himself. Firstmate never signs in for him and never reads
-#             session values out of his personal Chrome.
+#             session values out of his personal Chrome. Once the owner has signed in, run hide before any worker gets a page.
+#   hide      restart a visible browser headless, keeping its sessions (the same
+#             stop and headless start this script already uses). Refuses while
+#             a worker compartment is open, because a restart closes those
+#             pages, and names them. Does nothing if it is already hidden.
 #   stop      close it. Sessions survive in the profile because every launch
 #             passes --restore-last-session.
 #
@@ -87,11 +92,46 @@ work_browser_running() {
   curl -s --max-time 3 "$(work_browser_url)/json/version" >/dev/null 2>&1
 }
 
+# Prints hidden or visible. Hidden means the /json/version body carries Chrome's
+# HeadlessChrome marker. On current Chrome that marker is in the User-Agent, not
+# the Browser field, so the whole body is the signal. Anything that answers
+# without the marker is visible: a worker page in that browser pops on screen.
+work_browser_visibility() {
+  local body url
+  url=$(work_browser_url) || return 1
+  body=$(curl -fsS --max-time 3 "$url/json/version" 2>/dev/null) || return 1
+  [ -n "$body" ] || return 1
+  case "$body" in
+    *HeadlessChrome*) printf '%s\n' hidden ;;
+    *) printf '%s\n' visible ;;
+  esac
+}
+
+# Refuse to open a worker page unless the running browser is hidden. A browser
+# that is up but whose visibility cannot be read is treated as visible: the
+# failure mode this exists to prevent is a page appearing on screen.
+work_browser_require_hidden() {
+  local vis
+  if ! work_browser_running; then
+    return 0
+  fi
+  vis=$(work_browser_visibility) || vis=visible
+  if [ "$vis" != hidden ]; then
+    echo "error: the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
+    return 1
+  fi
+}
+
 launch() {  # <headed|headless>
-  local visibility=$1 port profile
+  local visibility=$1 port profile vis
   port=$(work_browser_port) || return 1
   profile=$(work_browser_profile) || return 1
   if work_browser_running; then
+    vis=$(work_browser_visibility) || vis=visible
+    if [ "$vis" != hidden ]; then
+      echo "the work browser is already running on port $port, and it is visible; hide it with bin/fm-work-browser.sh hide before any worker gets a page" >&2
+      return 0
+    fi
     echo "the work browser is already running on port $port"
     return 0
   fi
@@ -124,15 +164,49 @@ case "${1:---help}" in
     launch headed || exit 1
     profile=$(work_browser_profile)
     cat <<MSG
-Sign in to the work sites in the window that just opened, then leave it or
-restart it headless with: bin/fm-work-browser.sh stop && bin/fm-work-browser.sh start
-Its sessions live in $profile and survive a restart because every launch passes
---restore-last-session.
+Sign in to the work sites in the work browser window. Once the owner has signed in, run hide before any worker gets a page.
+  bin/fm-work-browser.sh hide
+A visible browser puts each later worker page on screen. hide restarts it headless and keeps its sessions, which live in $profile and survive because every launch passes --restore-last-session.
 MSG
+    ;;
+  hide)
+    if ! work_browser_running; then
+      echo "error: the work browser is not running; start it hidden with bin/fm-work-browser.sh start" >&2
+      exit 1
+    fi
+    vis=$(work_browser_visibility) || {
+      echo "error: could not tell whether the work browser is hidden; refusing to restart it" >&2
+      exit 1
+    }
+    if [ "$vis" = hidden ]; then
+      echo "the work browser is already hidden; nothing to do"
+      exit 0
+    fi
+    # A restart closes every open page. Name the worker compartments and stop
+    # rather than dropping a worker's page. Listing failure refuses too: hiding
+    # when the list cannot be read would close pages we failed to name.
+    names=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || exit 1
+    if [ -n "$names" ]; then
+      echo "error: cannot hide the work browser while a worker compartment is open, because a restart closes those pages:" >&2
+      printf '%s\n' "$names" >&2
+      exit 1
+    fi
+    "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
+    "$SCRIPT_DIR/fm-work-browser.sh" start || exit 1
+    vis=$(work_browser_visibility) || {
+      echo "error: hide restarted the work browser but could not confirm it is hidden" >&2
+      exit 1
+    }
+    if [ "$vis" != hidden ]; then
+      echo "error: hide restarted the work browser but it is still visible" >&2
+      exit 1
+    fi
+    echo "work browser is hidden; its sessions were kept because every launch passes --restore-last-session"
     ;;
   status)
     if work_browser_running; then
-      echo "work browser: running on $(work_browser_url)"
+      vis=$(work_browser_visibility) || vis=unknown
+      echo "work browser: running on $(work_browser_url) ($vis)"
       node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" status "$(work_browser_url)"
     else
       echo "work browser: not running (start it with bin/fm-work-browser.sh start)"
@@ -172,6 +246,7 @@ MSG
     ;;
   compartment-open)
     [ $# -ge 3 ] || { echo "error: compartment-open needs <task-id> <site>[,<site>...]" >&2; exit 1; }
+    work_browser_require_hidden || exit 1
     node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" open "$(work_browser_url)" "$2" "$3"
     ;;
   compartment-close)

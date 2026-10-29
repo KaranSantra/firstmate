@@ -182,20 +182,77 @@ test_browser_grant_wires_session_and_port_into_the_launch() {
 # A work grant attaches to the running work browser and carries no profile of its
 # own; the compartment inside that browser is what holds the session.
 test_work_grant_refuses_without_a_work_browser() {
-  local rec id out status
+  local rec id out status port
   id=browser-work-b2
   rec=$(make_case browser-work claude "$id")
   read_case "$rec"
 
-  # No work browser runs in the test home, so the spawn must refuse rather than
-  # launch a worker whose compartment was never created.
+  # No work browser runs in the test home. Pin a port nothing is listening on:
+  # the default 9333 is the real work browser, and a hidden one would accept
+  # the compartment. The pin is what makes "not running" true on a machine
+  # whose work browser is up.
+  port=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()});')
+  case "$port" in
+    ''|9222|9333) fail "refusing work-browser port '$port'" ;;
+  esac
+  printf '%s\n' "$port" > "$HOME_DIR/config/work-browser-port"
   status=0
-  out=$(run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(FM_WORK_BROWSER_PORT="$port" run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --browser work --sites example.com 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "a work grant launched with no work browser running: $out"
   assert_contains "$out" "compartment" "the refusal did not name the missing compartment: $out"
+  assert_not_contains "$out" "visible" "a missing work browser was described as visible: $out"
   [ ! -s "$LAUNCH_LOG" ] || fail "a failed compartment still launched a worker: $(cat "$LAUNCH_LOG")"
   pass "fm-spawn.sh: a work grant refuses rather than launching a worker with no compartment"
+}
+
+# The same refusal, when the browser is up but visible, has to point at hide.
+# Opening the compartment is what puts a blank worker page on screen.
+test_work_grant_refuses_a_visible_work_browser() {
+  local rec id out status port pid i
+  id=browser-work-visible
+  rec=$(make_case browser-work-visible claude "$id")
+  read_case "$rec"
+
+  port=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()});')
+  case "$port" in
+    ''|9222|9333) fail "refusing fake work-browser port '$port'" ;;
+  esac
+  printf '%s\n' "$port" > "$HOME_DIR/config/work-browser-port"
+  node -e '
+    const http = require("http");
+    const port = Number(process.argv[1]);
+    http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        Browser: "Chrome/1.2.3",
+        "User-Agent": "Mozilla/5.0 Chrome/1.2.3",
+        webSocketDebuggerUrl: "ws://127.0.0.1:" + port + "/devtools/browser/fake"
+      }));
+    }).listen(port, "127.0.0.1");
+  ' "$port" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 20 ]; do
+    curl -sf --max-time 1 "http://127.0.0.1:$port/json/version" >/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! curl -sf --max-time 1 "http://127.0.0.1:$port/json/version" >/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    fail "fake work browser did not answer on port $port"
+  fi
+
+  status=0
+  out=$(FM_WORK_BROWSER_PORT="$port" run_ship "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --browser work --sites example.com 2>&1) || status=$?
+  kill "$pid" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "a work grant launched against a visible work browser: $out"
+  assert_contains "$out" "bin/fm-work-browser.sh hide" \
+    "the refusal did not point at hide: $out"
+  assert_contains "$out" "visible" "the refusal did not say the browser is visible: $out"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a visible-browser refusal still launched a worker: $(cat "$LAUNCH_LOG")"
+  pass "fm-spawn.sh: a work grant against a visible browser points at hide"
 }
 
 # The allowlist IS the worker's blast radius, so it must be chosen per task and
@@ -317,6 +374,7 @@ test_ordinary_task_record_keeps_no_chrome_line
 test_non_claude_harness_refuses_the_grant
 test_browser_grant_wires_session_and_port_into_the_launch
 test_work_grant_refuses_without_a_work_browser
+test_work_grant_refuses_a_visible_work_browser
 test_work_grant_requires_an_explicit_site_allowlist
 test_two_grants_get_distinct_ports
 test_browser_cap_refuses_beyond_the_configured_limit

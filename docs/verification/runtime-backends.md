@@ -466,9 +466,20 @@ B9C2A702 ctx=770B9D32 https://example.com/   <- the compartment
 
 That is why the generated brief forbids `newpage` outright and tells a worker to navigate with `open` instead.
 
+### A visible work browser cannot open a worker page
+
+`bin/fm-work-browser.sh` reads `/json/version` and treats the browser as hidden only when that body contains `HeadlessChrome`.
+Measured 2026-10-29 on Chrome 156.0.8078.73 launched with `--headless=new`, that marker is in the User-Agent (`HeadlessChrome/156.0.0.0`) and not in the Browser field (`Chrome/156.0.8078.73`), so a check of the Browser field alone would call a hidden browser visible.
+`status` prints `hidden` or `visible`.
+`compartment-open` refuses while the browser is visible and names `hide`.
+`hide` restarts a visible browser with the same stop and headless start, which passes `--restore-last-session`, and refuses while a worker compartment is open.
+Worker compartments are the ids in `Target.getBrowserContexts` `browserContextIds`.
+On this Chrome the default context also has an id, so the presence of any `browserContextId` is not a compartment.
+`bash tests/fm-work-browser-hidden.test.sh` covers those refusals against a fake endpoint and does not launch Chrome.
+
 ### Refreshing this evidence
 
-`bash tests/fm-work-browser-live-e2e.test.sh` drives a real throwaway Chrome and re-checks the compartment properties, the idempotent close, and the refusal of port 9222.
+`bash tests/fm-work-browser-live-e2e.test.sh` drives a real throwaway Chrome and re-checks the compartment properties, the idempotent close, the refusal of port 9222, and that a headless start reports hidden.
 It spends no model tokens and runs by default wherever Chrome, `node` and `curl` are installed.
 The Claude Code flag matrix above is refreshed by rerunning the two commands in this section after a Claude Code upgrade.
 
