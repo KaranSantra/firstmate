@@ -501,20 +501,56 @@ test_hide_restarts_a_visible_browser_hidden_and_keeps_the_session_flag() {
   pass "fm-work-browser.sh: hide restarts a visible browser headless and keeps session restore"
 }
 
-test_sign_in_and_usage_say_to_hide_before_a_worker_gets_a_page() {
-  local out phrase
+test_sign_in_restarts_a_hidden_browser_visible_and_says_to_hide_after() {
+  local out args phrase
   phrase="Once the owner has signed in, run hide before any worker gets a page."
   start_fake hidden
   reset_chrome_log
-  out=$(WB sign-in 2>&1) || fail "sign-in failed against an already-running browser: $out"
+  CHROME_BIN_OVERRIDE=$RESTART_CHROME
+  out=$(WB sign-in 2>&1) || {
+    CHROME_BIN_OVERRIDE=
+    fail "sign-in did not restart a hidden browser with no compartments: $out"
+  }
+  CHROME_BIN_OVERRIDE=
+  assert_contains "$out" "work browser stopped" "sign-in did not use the existing stop: $out"
+  assert_contains "$out" "(headed)" "sign-in did not start the browser headed: $out"
   assert_contains "$out" "$phrase" "sign-in did not tell the owner to run hide: $out"
   assert_contains "$out" "bin/fm-work-browser.sh hide" "sign-in did not name the hide command: $out"
-  chrome_was_launched && fail "sign-in relaunched an already-running browser: $(cat "$CHROME_LOG")"
+  args=$(cat "$CHROME_LOG")
+  assert_not_contains "$args" "--headless" "the sign-in restart requested headless: $args"
+  assert_contains "$args" "--restore-last-session" "the sign-in restart dropped the session-restore flag: $args"
+  out=$(curl -sf --max-time 2 "http://127.0.0.1:$FAKE_PORT/json/version") \
+    || fail "the browser restarted for sign-in is not answering"
+  assert_not_contains "$out" "HeadlessChrome" "the browser restarted for sign-in is still hidden: $out"
+
+  reset_chrome_log
+  out=$(WB sign-in 2>&1) || fail "sign-in failed against an already-visible browser: $out"
+  assert_contains "$out" "already running" "a visible browser was not reported as already running: $out"
+  chrome_was_launched && fail "sign-in relaunched an already-visible browser: $(cat "$CHROME_LOG")"
 
   out=$("$ROOT/bin/fm-work-browser.sh" help 2>&1) || fail "help failed: $out"
   assert_contains "$out" "$phrase" "usage did not tell the owner to run hide: $out"
   assert_contains "$out" "hide" "usage did not document hide: $out"
-  pass "fm-work-browser.sh: sign-in and usage say to run hide before any worker gets a page"
+  pass "fm-work-browser.sh: sign-in restarts a hidden browser visible and says to run hide after"
+}
+
+test_sign_in_refuses_to_restart_a_hidden_browser_while_a_worker_compartment_is_open() {
+  local out status
+  start_fake hidden "worker-alpha"
+  reset_chrome_log
+  CHROME_BIN_OVERRIDE=$RESTART_CHROME
+  status=0
+  out=$(WB sign-in 2>&1) || status=$?
+  CHROME_BIN_OVERRIDE=
+  [ "$status" -ne 0 ] || fail "sign-in restarted while a worker compartment was open: $out"
+  assert_contains "$out" "CTX1" "sign-in did not list the open compartment's context id: $out"
+  assert_contains "$out" "restart closes those pages" "the refusal did not say why it stopped: $out"
+  assert_not_contains "$out" "DEFAULT" "sign-in listed the default context as a worker compartment: $out"
+  chrome_was_launched && fail "sign-in launched Chrome while refusing: $(cat "$CHROME_LOG")"
+  out=$(curl -sf --max-time 2 "http://127.0.0.1:$FAKE_PORT/json/version") \
+    || fail "sign-in stopped the browser while a worker compartment was open"
+  assert_contains "$out" "HeadlessChrome" "sign-in changed the browser while refusing: $out"
+  pass "fm-work-browser.sh: sign-in refuses to restart a hidden browser while a worker compartment is open"
 }
 
 test_status_reports_hidden_and_visible
@@ -526,5 +562,6 @@ test_start_on_a_visible_browser_names_hide
 test_hide_does_nothing_when_already_hidden_and_refuses_when_not_running
 test_hide_refuses_while_a_worker_compartment_is_open_and_lists_its_context_id
 test_hide_restarts_a_visible_browser_hidden_and_keeps_the_session_flag
-test_sign_in_and_usage_say_to_hide_before_a_worker_gets_a_page
+test_sign_in_restarts_a_hidden_browser_visible_and_says_to_hide_after
+test_sign_in_refuses_to_restart_a_hidden_browser_while_a_worker_compartment_is_open
 printf '%s\n' "# all fm-work-browser-hidden tests passed"

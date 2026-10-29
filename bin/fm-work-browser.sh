@@ -18,7 +18,9 @@
 #             visible, start names hide instead of leaving it on screen.
 #   sign-in   launch it headed, once, so the captain can sign into the work
 #             sites himself. Firstmate never signs in for him and never reads
-#             session values out of his personal Chrome. Once the owner has signed in, run hide before any worker gets a page.
+#             session values out of his personal Chrome. A hidden browser is
+#             restarted visible, keeping its sessions, and like hide this refuses
+#             while a worker compartment is open. Once the owner has signed in, run hide before any worker gets a page.
 #   hide      restart a visible browser headless, keeping its sessions (the same
 #             stop and headless start this script already uses). Refuses while
 #             a worker compartment is open, because a restart closes those
@@ -128,6 +130,19 @@ work_browser_require_hidden() {
   return 1
 }
 
+# A restart closes every open page. List the worker compartments by context id
+# and stop rather than dropping a worker's page. Listing failure refuses too:
+# restarting when the list cannot be read would close pages we failed to list.
+work_browser_require_no_compartments() {  # <action>
+  local contexts
+  contexts=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || return 1
+  if [ -n "$contexts" ]; then
+    echo "error: cannot $1 while a worker compartment is open, because a restart closes those pages:" >&2
+    printf '%s\n' "$contexts" >&2
+    return 1
+  fi
+}
+
 launch() {  # <headed|headless>
   local visibility=$1 port profile vis
   port=$(work_browser_port) || return 1
@@ -167,6 +182,15 @@ case "${1:---help}" in
   url) work_browser_url ;;
   start) launch headless ;;
   sign-in)
+    # A hidden browser has no window to sign in through. Restart it visible with
+    # the same stop and a headed launch, which keeps its sessions.
+    if work_browser_running; then
+      vis=$(work_browser_visibility) || vis=unknown
+      if [ "$vis" = hidden ]; then
+        work_browser_require_no_compartments "restart the work browser visible for sign-in" || exit 1
+        "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
+      fi
+    fi
     launch headed || exit 1
     profile=$(work_browser_profile)
     cat <<MSG
@@ -188,15 +212,7 @@ MSG
       echo "the work browser is already hidden; nothing to do"
       exit 0
     fi
-    # A restart closes every open page. List the worker compartments by context
-    # id and stop rather than dropping a worker's page. Listing failure refuses
-    # too: hiding when the list cannot be read would close pages we failed to list.
-    contexts=$(node "$SCRIPT_DIR/fm-work-browser-cdp.mjs" compartments "$(work_browser_url)") || exit 1
-    if [ -n "$contexts" ]; then
-      echo "error: cannot hide the work browser while a worker compartment is open, because a restart closes those pages:" >&2
-      printf '%s\n' "$contexts" >&2
-      exit 1
-    fi
+    work_browser_require_no_compartments "hide the work browser" || exit 1
     "$SCRIPT_DIR/fm-work-browser.sh" stop || exit 1
     "$SCRIPT_DIR/fm-work-browser.sh" start || exit 1
     vis=$(work_browser_visibility) || {
