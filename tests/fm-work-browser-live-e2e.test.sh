@@ -77,9 +77,14 @@ console.log(new Set(t.targetInfos.filter(x => x.type === "page").map(x => x.brow
 ws.close();'
 
 test_work_browser_starts_and_reports_status() {
+  local status body
   WB start >/dev/null 2>&1 || fail "the work browser did not start on port $PORT"
-  WB status >/dev/null 2>&1 || fail "the work browser reported no status after starting"
-  pass "fm-work-browser.sh: starts headless and reports status"
+  status=$(WB status 2>&1) || fail "the work browser reported no status after starting: $status"
+  assert_contains "$status" "(hidden)" "a headless start did not report the work browser hidden: $status"
+  body=$(curl -s --max-time 3 "http://127.0.0.1:$PORT/json/version") || fail "could not read /json/version"
+  assert_contains "$body" "HeadlessChrome" \
+    "headless Chrome did not emit the HeadlessChrome marker the visibility check uses: $body"
+  pass "fm-work-browser.sh: starts headless and reports status as hidden"
 }
 
 # The whole point of the design: a worker gets the captain's real session for

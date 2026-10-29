@@ -2454,7 +2454,7 @@ if [ -n "$BROWSER" ]; then
     # the privileged half of this design and stays on this side of the boundary.
     # It never reads the captain's personal Chrome.
     browser_open=$("$SCRIPT_DIR/fm-work-browser.sh" compartment-open "$ID" "$BROWSER_SITES") || {
-      echo "error: could not open a sealed browser compartment for $ID; is the work browser running? (bin/fm-work-browser.sh status)" >&2
+      echo "error: could not open a sealed browser compartment for $ID; see the reason above" >&2
       exit 1
     }
     BROWSER_CONTEXT=$(printf '%s\n' "$browser_open" | sed -n 's/^context=//p')

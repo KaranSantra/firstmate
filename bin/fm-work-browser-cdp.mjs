@@ -30,13 +30,20 @@ function die(msg) {
   process.exit(1);
 }
 
-async function connect(baseUrl) {
+function versionConfirmsHidden(body) {
+  return typeof body === 'string' && body.includes('HeadlessChrome');
+}
+
+async function connect(baseUrl, unreadable = `the work browser is not answering at ${baseUrl}; start it with bin/fm-work-browser.sh start`) {
   let version;
+  let versionBody = '';
   try {
     const res = await fetch(`${baseUrl}/json/version`, { signal: AbortSignal.timeout(5000) });
-    version = await res.json();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    versionBody = await res.text();
+    version = JSON.parse(versionBody);
   } catch {
-    die(`the work browser is not answering at ${baseUrl}; start it with bin/fm-work-browser.sh start`);
+    die(unreadable);
   }
   const ws = new WebSocket(version.webSocketDebuggerUrl);
   let id = 0;
@@ -54,7 +61,7 @@ async function connect(baseUrl) {
     pending.set(mid, m => (m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result)));
     ws.send(JSON.stringify({ id: mid, method, params }));
   });
-  return { ws, send };
+  return { ws, send, versionBody };
 }
 
 // A cookie belongs to an allowlisted site when its domain is that site or any
@@ -71,7 +78,12 @@ if (op === 'open') {
   const sites = allowlist.split(',').map(s => s.trim().replace(/^\./, '').toLowerCase()).filter(Boolean);
   if (!sites.length) die('open needs at least one site in the allowlist');
 
-  const { ws, send } = await connect(base);
+  const { ws, send, versionBody } = await connect(base,
+    'could not confirm the work browser is hidden because its /json/version read failed, so no worker page opens; hide it with bin/fm-work-browser.sh hide before any worker gets a page');
+  if (!versionConfirmsHidden(versionBody)) {
+    ws.close();
+    die('the work browser is visible, so a worker page would open on screen; hide it with bin/fm-work-browser.sh hide before any worker gets a page');
+  }
   const { browserContextId } = await send('Target.createBrowserContext', {});
   const shared = await send('Storage.getCookies', {});
   const give = shared.cookies.filter(c => cookieAllowed(c.domain, sites));
@@ -86,7 +98,9 @@ if (op === 'open') {
   if (!give.length) {
     process.stderr.write(
       `warning: the work browser holds no cookies for ${sites.join(', ')}; this compartment will be signed out. ` +
-      'Sign the work browser into that site once with bin/fm-work-browser.sh sign-in.\n');
+      'To sign it in, close this compartment first with bin/fm-work-browser.sh compartment-close ' +
+      `${browserContextId} (or exit this worker), then run bin/fm-work-browser.sh sign-in, then bin/fm-work-browser.sh hide, ` +
+      'then start the worker again.\n');
   }
   ws.close();
 } else if (op === 'close') {
@@ -107,6 +121,19 @@ if (op === 'open') {
     }
   }
   ws.close();
+} else if (op === 'compartments') {
+  // A worker compartment is a context this fleet created, not the default one.
+  // Current Chrome gives the default context an id too, so "any browserContextId"
+  // is not a compartment. Target.getBrowserContexts.browserContextIds is the list
+  // of created contexts, reported here by their exact ids.
+  const { ws, send } = await connect(base);
+  const listed = await send('Target.getBrowserContexts', {});
+  if (!Array.isArray(listed.browserContextIds)) {
+    ws.close();
+    die('the work browser did not report its compartments; refusing to treat that as none open');
+  }
+  for (const contextId of listed.browserContextIds) process.stdout.write(`${contextId}\n`);
+  ws.close();
 } else if (op === 'status') {
   const { ws, send } = await connect(base);
   const targets = await send('Target.getTargets', {});
@@ -115,5 +142,5 @@ if (op === 'open') {
   process.stdout.write(`pages=${pages.length}\ncontexts=${contexts.size}\n`);
   ws.close();
 } else {
-  die('usage: fm-work-browser-cdp.mjs <open|close|status> <browser-url> [args]');
+  die('usage: fm-work-browser-cdp.mjs <open|close|status|compartments> <browser-url> [args]');
 }
