@@ -837,6 +837,7 @@ tests/fm-live-lab-up-mate.test.sh 17363
 tests/fm-live-lab.test.sh 79639
 tests/fm-mail-check.test.sh 7524
 tests/fm-mail.test.sh 9684
+tests/fm-model-labels.test.sh 2700
 tests/fm-muse-harness.test.sh 46548
 tests/fm-muse-signals-live-e2e.test.sh 52
 tests/fm-nm-test-contract.test.sh 853
@@ -908,6 +909,7 @@ tests/fm-sessionstart-hook-live-e2e.test.sh 50
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 49
 tests/fm-sessionstart-nudge.test.sh 71802
 tests/fm-shared-captain-inheritance.test.sh 7991
+tests/fm-spawn-chrome.test.sh 44000
 tests/fm-spawn-compact-adviser-disable-remote.test.sh 38561
 tests/fm-spawn-compact-adviser-disable.test.sh 21654
 tests/fm-spawn-dispatch-profile.test.sh 197548
@@ -917,6 +919,7 @@ tests/fm-spawn-worktree-settle.test.sh 9309
 tests/fm-startup-memory-budget.test.sh 8086
 tests/fm-startup-network.test.sh 72106
 tests/fm-stat-shadowing.test.sh 75
+tests/fm-state-marker.test.sh 9600
 tests/fm-stow-cascade.test.sh 3058
 tests/fm-subagent-pretool-check.test.sh 998
 tests/fm-supervision-events.test.sh 673
@@ -957,6 +960,7 @@ tests/fm-warm-compact.test.sh 1500
 tests/fm-watch-arm.test.sh 113076
 tests/fm-watch-checkpoint.test.sh 11234
 tests/fm-watch-inbox-meta.test.sh 283
+tests/fm-watch-parked-run.test.sh 92000
 tests/fm-watch-recovery-loop.test.sh 59092
 tests/fm-watch-triage-pause.test.sh 466750
 tests/fm-watch-triage-wedge-defer.test.sh 526980
@@ -965,6 +969,7 @@ tests/fm-watch-wedge-cap.test.sh 374225
 tests/fm-watch-wedge-cap-unconfigured-parity.test.sh 27763
 tests/fm-watch-wedge-cap-live.test.sh 74
 tests/fm-watcher-lock.test.sh 72022
+tests/fm-work-browser-hidden.test.sh 9200
 tests/fm-worker-account-live-e2e.test.sh 3179
 tests/fm-worker-account.test.sh 37445
 EOF
