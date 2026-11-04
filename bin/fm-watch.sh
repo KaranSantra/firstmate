@@ -14,7 +14,7 @@
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
-# while the away-posture record (state/.afk-contract) exists an
+# while an away record (state/.afk-contract, never quiet mode's) exists an
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
@@ -77,20 +77,10 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
-#                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
-#                          an unhandled record's ladder cannot advance; quiet
-#                          successful attempts never wake firstmate
-#                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
-#   stale: <window> (task <id>: no-mistakes run parked on worker <dur> at <step>[, <k> finding(s)])
-#                          a task's no-mistakes run has sat on `awaiting_agent:
-#                          parked` past FM_PARKED_RUN_SECS (default 300, or
-#                          config/parked-run-secs), whatever its declared wait
-#                          says; one wake per parked episode, never for a
-#                          verified captain-held transfer or a human-owed gate
-#                          whose decision is already open (parked_run_tick owns
-#                          the rules)
+#   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
+#                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
+#                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -232,8 +222,9 @@ WATCH_HOME_EXISTED=0
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
-# attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
-# watcher reads only its presence (afk_record_present below).
+# attended and the afk session; bin/fm-afk-contract.sh owns its schema and its
+# away-or-quiet reading, which is all this watcher reads (away_record_present
+# below).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 # Persistent-secondmate endpoint liveness: the shared probe/relaunch library is
@@ -286,7 +277,9 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 # for inspection (the grace above); at or past it the re-arm evicts the holder
 # instead, because a watcher whose beacon has stalled that long is not polling
 # and nothing else would ever replace it (evict_stalled_holder below).
-WATCHER_STALL_BOUND=${FM_WATCHER_STALL_BOUND:-$((WATCHER_STALE_GRACE * 3))}
+# fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
+# the arm that follows this watcher.
+WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -384,7 +377,7 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain while the away-posture record
-# exists, which is never rechecked (afk_record_present below).
+# exists, which is never rechecked (away_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
@@ -409,19 +402,21 @@ _event_cap_fails=0
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
-# afk_record_present: 0 while the away-posture record exists (the captain is
-# away, in either supervision shape). While it exists an item held for the
-# captain is never rechecked: there is nobody to answer it, the return brief
-# lists it, and a recheck would only churn (the 2026-09-07 away-window audit
-# counted hourly rechecks of captain-held items as pure noise). Declared
-# external waits keep their condition-aware cadence in both postures.
-afk_record_present() { fm_afk_contract_present "$STATE"; }
+# away_record_present: 0 while an away record exists (the captain is away, in
+# either supervision shape); quiet mode's record is a present captain, so it
+# reads 1 (fm_afk_contract_away_present). "The away-posture record exists"
+# below means this. While it exists an item held for the captain is never
+# rechecked: there is nobody to answer it, the return brief lists it, and a
+# recheck would only churn (the 2026-09-07 away-window audit counted hourly
+# rechecks of captain-held items as pure noise). Declared external waits keep
+# their condition-aware cadence in both postures.
+away_record_present() { fm_afk_contract_away_present "$STATE"; }
 
 # captain_held_silenced <status-line>: 0 when the line declares a captain-held
-# transfer and the away-posture record exists, so every stale path absorbs the
-# pane silently instead of rechecking it.
+# transfer and an away record exists, so every stale path absorbs the pane
+# silently instead of rechecking it.
 captain_held_silenced() {  # <status-line>
-  status_is_captain_held "$1" && afk_record_present
+  status_is_captain_held "$1" && away_record_present
 }
 
 hash_pane() {
@@ -520,26 +515,20 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
-# Quiet when healthy: an absent, empty, or handled inbox costs one directory
-# glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
-# or missing skips the ladder altogether: it is never typed into and surfaces
-# as that same stale wake exactly once. If the attempt's ladder write fails while
-# its record remains unhandled, that unwritable state surfaces through the same
-# stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking. Runs for secondmates
-# too: their pane-staleness exemption is about quiet panes being healthy,
-# while an unacknowledged instruction past the ladder is a stuck steer.
+# bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
+# Endpoint and busy checks precede delivery so recovery never types into a busy,
+# dead, or missing worker; the ring helper protects pending composer text.
+# Normal retries keep the watcher blocking rather than waking firstmate.
+# Runs for secondmates too: their pane-staleness exemption is about quiet panes
+# being healthy, while an unacknowledged instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
+  if [ "$verb" = retry ] && [ -n "$(status_own_open_decisions "$STATE/$task.status")" ]; then
+    return 0
+  fi
   rec=${action#* }
   count=
   case "$verb" in
@@ -552,13 +541,29 @@ inbox_steer_check() {  # <window> <task>
   agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   case "$agent_state" in
     dead|missing)
-      inbox_steer_escalate_unavailable "$w" "$task" "$rec"
+      if [ "$verb" = retry ]; then
+        fm_task_inbox_clear_retry "$STATE" "$task" "$rec" || true
+      else
+        inbox_steer_escalate_unavailable "$w" "$task" "$rec"
+      fi
       return 0
       ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
-    return 0
+    [ "$verb" != retry ] || return 0
+    if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
+      [ -f "$rec" ] || return 0
+      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
+    elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
+      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+    else
+      return 0
+    fi
+    verb=escalate
+  elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+    reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
+    verb=escalate
   fi
   case "$verb" in
     ring)
@@ -581,8 +586,18 @@ inbox_steer_check() {  # <window> <task>
       fi
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
+    retry)
+      ring_rc=0
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
+        reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+      triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc"
+      ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
@@ -1454,7 +1469,7 @@ EOF
     return 1
   fi
   key=$(window_key "$win")
-  if [ "$whom" = captain ] && afk_record_present; then
+  if [ "$whom" = captain ] && away_record_present; then
     triage_log "absorbed $label ($kind, never rechecked while the away-posture record exists): $win"
     return 0
   fi
@@ -1666,7 +1681,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
-    if afk_record_present; then
+    if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
       return 0
     fi
@@ -1940,7 +1955,7 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  afk_record_present && return 0
+  away_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -2038,167 +2053,6 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
-# A no-mistakes run parked on its WORKER ("awaiting_agent: parked <duration>")
-# is waiting for a move only that worker can make, and nothing on the pane or in
-# the status log says so: a worker that declared `paused: waiting for the run to
-# return a gate or outcome` while its run sat at a review or test gate stayed
-# silent for 20-50 minutes, because every other stale path absorbs a declared
-# wait. This tick reads the run itself instead. It spends no model call: each
-# due task costs one fm-crew-state.sh read, throttled per task and capped per
-# poll below.
-#
-# The run's own clock decides when a parked run needs attention, not the
-# watcher's: fm-crew-state.sh mints it as the `parked-for:` component from the
-# run's `awaiting_agent` line, so an episode that began before this watcher
-# started, or between two reads, still counts from when it really began.
-# Threshold: FM_PARKED_RUN_SECS, else the first line of config/parked-run-secs,
-# else 300. Any unusable value falls back to the default so a typo can never
-# silence it. It is re-read every tick, so an edit applies without restarting
-# the watcher.
-#
-# One wake per parked EPISODE. An episode ends only when a run-step read says
-# the run left the parked-on-worker state (it is working, finished, or failed).
-# Any other read, including an unreadable or timed-out verdict, an empty line,
-# a non-run source, and a parked gate with no worker clock, leaves the record
-# untouched, so it can neither end an episode nor open one. A reading whose
-# clock is lower than the previous reading, or one that names a different run
-# or step, is a new episode whose end was not observed. The record,
-# .parked-run-<task>, is one tab line:
-#   <run>  <step>  <last-parked-secs>  <active|idle>  <alerted 0|1>
-#
-# Postures are unchanged. The tick reads only runs parked on their worker, so a
-# task with no run, a running run, and an external wait with nothing parked all
-# stay silent. A verified captain-held transfer is never woken for, and neither
-# is a gate owed to a human whose needs-decision for THIS run is already open
-# (firstmate was told, and the answer is firstmate's). The tick never answers a
-# gate and never steers the worker; the reason only prompts firstmate to look.
-# While state/.afk exists the wake is queued like every other and the away
-# daemon classifies it (bin/fm-supervise-daemon.sh escalates this reason).
-PARKED_RUN_SECS_DEFAULT=300
-PARKED_RUN_CHECK_SECS=60
-PARKED_RUN_READS_PER_POLL=3
-
-parked_run_threshold() {  # -> seconds
-  local v=${FM_PARKED_RUN_SECS-} f="$CONFIG/parked-run-secs" LC_ALL=C
-  if [ -z "$v" ] && [ -f "$f" ] && [ ! -L "$f" ]; then
-    IFS= read -r v < "$f" 2>/dev/null || true
-    v=${v#"${v%%[![:space:]]*}"}
-    v=${v%"${v##*[![:space:]]}"}
-  fi
-  case "$v" in
-    ''|*[!0-9]*) printf '%s' "$PARKED_RUN_SECS_DEFAULT"; return ;;
-  esac
-  v=${v#"${v%%[!0]*}"}
-  # String > (not -gt): 19-digit values can exceed bash arithmetic range.
-  # shellcheck disable=SC2071
-  if [ -z "$v" ] || [ "${#v}" -gt 19 ] \
-    || { [ "${#v}" -eq 19 ] && [[ "$v" > 9223372036854775807 ]]; }; then
-    printf '%s' "$PARKED_RUN_SECS_DEFAULT"
-  else
-    printf '%s' "$v"
-  fi
-}
-
-parked_run_fmt_secs() {  # <seconds>
-  local s=$1
-  if [ "$s" -lt 60 ]; then printf '%ss' "$s"
-  elif [ "$s" -lt 3600 ]; then printf '%sm' $((s / 60))
-  else printf '%sh%sm' $((s / 3600)) $(((s % 3600) / 60))
-  fi
-}
-
-parked_run_record_write() {  # <task> <run> <step> <secs> <active|idle> <alerted>
-  printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" > "$STATE/.parked-run-$1"
-}
-
-# <task> <window> <threshold>: a reading whose verdict parsed as parked on the
-# worker (fm_parked_run_parse set the FM_PARKED_* facts).
-parked_run_observe() {
-  local task=$1 win=$2 threshold=$3 rec="$STATE/.parked-run-$1" statusf="$STATE/$1.status"
-  local r_run='' r_step='' r_last=0 r_state=idle r_alerted=0 run step alerted=0
-  local dur reason findings=''
-  run=${FM_PARKED_RUN:--}; step=$FM_PARKED_STEP
-  if [ -f "$rec" ] && [ ! -L "$rec" ]; then
-    IFS=$'\t' read -r r_run r_step r_last r_state r_alerted < "$rec" 2>/dev/null || true
-  fi
-  case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
-  if [ "$r_run" = "$run" ] && [ "$r_step" = "$step" ] \
-    && [ "$r_state" = active ] && [ "$FM_PARKED_SECS" -ge "$r_last" ]; then
-    [ "$r_alerted" = 1 ] && alerted=1
-  fi
-  if [ "$alerted" -eq 0 ] && [ "$FM_PARKED_SECS" -ge "$threshold" ]; then
-    if status_is_captain_held "$(status_declared_wait_line "$statusf")"; then
-      triage_log "absorbed parked run (verified captain-held transfer): $task"
-    elif [ -n "$FM_PARKED_HUMAN" ] && [ "$run" != - ] && status_has_open_needs_decision "$statusf" "$run"; then
-      triage_log "absorbed parked run (its ask-user decision is already open with firstmate): $task"
-    else
-      dur=$(parked_run_fmt_secs "$FM_PARKED_SECS")
-      if [ -n "$FM_PARKED_FINDINGS" ]; then
-        if [ "$FM_PARKED_FINDINGS" = 1 ]; then findings=", 1 finding"; else findings=", $FM_PARKED_FINDINGS findings"; fi
-      fi
-      reason="stale: $win (task $task: no-mistakes run parked on worker $dur at $step$findings)"
-      fm_wake_append stale "$win" "$reason" || exit 1
-      parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active 1
-      wake "$reason"
-    fi
-  fi
-  parked_run_record_write "$task" "$run" "$step" "$FM_PARKED_SECS" active "$alerted"
-}
-
-parked_run_tick() {
-  local threshold meta kind task win marker due age line state src reads=0 rec
-  local r_run='' r_step=''
-  local -a candidates=()
-  threshold=$(parked_run_threshold)
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
-    case "$kind" in scout|secondmate) continue ;; esac
-    task=${meta##*/}
-    task=${task%.meta}
-    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    win=$(fm_backend_target_of_meta "$meta")
-    [ -n "$win" ] || continue
-    marker="$STATE/.parked-run-check-$task"
-    due=$(cat "$marker" 2>/dev/null || true)
-    case "$due" in ''|*[!0-9]*) due=$PARKED_RUN_CHECK_SECS ;; esac
-    age=$(age_of "$marker")
-    [ "$age" -ge "$due" ] || continue
-    candidates+=("$((due - age))"$'\t'"$task")
-  done
-  [ "${#candidates[@]}" -gt 0 ] || return 0
-  while IFS=$'\t' read -r _ task; do
-    [ "$reads" -lt "$PARKED_RUN_READS_PER_POLL" ] || break
-    win=$(fm_backend_target_of_meta "$STATE/$task.meta")
-    [ -n "$win" ] || continue
-    marker="$STATE/.parked-run-check-$task"
-    reads=$((reads + 1))
-    line=$(FM_CREW_STATE_RUN_ONLY=1 FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-    rec="$STATE/.parked-run-$task"
-    state=''; src=''
-    case "$line" in
-      state:*)
-        state=${line#state: }; state=${state%% *}
-        src=${line#*source: }; src=${src%% *}
-        ;;
-    esac
-    printf '%s' "$PARKED_RUN_CHECK_SECS" > "$marker"
-    if fm_parked_run_parse "$line"; then
-      parked_run_observe "$task" "$win" "$threshold"
-    elif [ "$src" = run-step ] && [ -f "$rec" ] && [ ! -L "$rec" ]; then
-      case "$state" in
-        working|done|failed)
-          r_run=''; r_step=''
-          IFS=$'\t' read -r r_run r_step < "$rec" 2>/dev/null || true
-          r_step=${r_step%%$'\t'*}
-          parked_run_record_write "$task" "$r_run" "$r_step" 0 idle 0
-          ;;
-      esac
-    fi
-  done < <(printf '%s\n' "${candidates[@]}" | LC_ALL=C sort -k1,1n -k2,2)
-  return 0
-}
-
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2214,8 +2068,13 @@ parked_run_tick() {
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf
+  local f sig sf exclude
+  # A remote mate's own parent channel is not a self-home task status log; the
+  # home-shape-aware exclusion and its precedent live in
+  # status_scan_parent_channel_exclude (fm-classify-lib.sh).
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
@@ -2479,10 +2338,14 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc found=1 sig marker
+  local f task record rest endpoint ident rc found=1 sig marker exclude
+  # Same self-home exclusion as scan_signals: a remote mate's parent channel
+  # must not come back through the heartbeat fail-safe backstop.
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
@@ -2918,10 +2781,6 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
-
-  # A run parked on its worker is quiet on every pane and status path, so it is
-  # read from the run itself on its own bounded cadence (parked_run_tick).
-  parked_run_tick
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
