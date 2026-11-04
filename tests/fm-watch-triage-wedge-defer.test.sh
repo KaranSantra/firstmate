@@ -949,6 +949,9 @@ test_wedge_threshold_validating_run_is_off_until_armed() {
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
   [ ! -e "$dir/config/wedge-defer-validating" ] \
     || fail "the unarmed fixture armed the flag, so it proves nothing"
+  # This counts the wedge timer's own reads. The parked-run tick reads the same
+  # fake on its own cadence and cannot be switched off, so hold that read not-due.
+  printf '999999\n' > "$state/.parked-run-check-wedge"
   export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
   : > "$FM_FAKE_CREW_STATE_LOG"
   n=1
