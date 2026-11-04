@@ -12,8 +12,7 @@
 #
 # Producers:
 #   bin/fm-watch.sh   sync, once per poll cycle
-#   bin/fm-spawn.sh   order-key before a projected task is ordered, then
-#                     sync <task> once its metadata is published
+#   bin/fm-spawn.sh   sync <task> once its metadata is published
 #
 # Usage:
 #   fm-herdr-groups.sh plan [<task>]
@@ -35,8 +34,9 @@
 # one pane. A pane missing from the live list is skipped.
 # clear removes this home's tokens from live panes and projected workspaces and
 # clears the agents view for every recorded session.
-# order-key prints the "<rank>.<group>" key bin/fm-spawn.sh passes to
-# fm_backend_herdr_projection_order_best_effort, or nothing when off.
+# order-key prints the "<rank>.<group>" key for a task, or nothing when off.
+# No spawn path consumes it: per-project grouping places each worker's space
+# (docs/herdr-backend.md "Presentation spaces"), so the key only names the order.
 # sidebar-config prints the suggested Herdr sidebar rows; with --apply it
 # copies the named file to <file>.bak-<epoch> and appends the rows, refusing
 # when the file already defines [ui.sidebar.spaces] or [ui.sidebar.agents].
