@@ -4,6 +4,8 @@ This page covers running Firstmate workers on the Herdr runtime backend: setup, 
 Operators who choose Herdr, or who verify Firstmate against it, need it.
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
+This backend uses the existing `herdr` product line, not the separate preview products herdr-core (`hc`) and herdr-app.
+Those previews are not upgrades to `herdr` 0.9.x and are not currently supported by this adapter.
 Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
@@ -19,10 +21,12 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
 | The per-project grouped worker spaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| Grouping tasks by project with status tags and a sorted agents list | [Project groups](#project-groups) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| Keeping Firstmate from starting a server a service manager owns | [Externally managed servers](#externally-managed-servers) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
@@ -37,9 +41,10 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 focus-safe workspace removal and native event subscription.
+- `python3` only for optional protocol-16 focus-safe workspace removal, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
 
-Herdr is dual-licensed AGPL-3.0-or-later or commercial.
+Herdr is Apache-2.0 licensed.
+Releases before 0.8.0 were dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
 
 ### Selecting Herdr
@@ -50,7 +55,7 @@ Select Herdr in any of these ways:
 - `FM_BACKEND=herdr` for one launch.
 - An explicit request to Firstmate.
 
-A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns that requirement and the readiness its host must meet.
+[`remote-secondmates.md`](remote-secondmates.md#launch-or-recover) owns remote second-mate backend selection, placement, and readiness.
 
 Herdr is also auto-detected when the primary runs natively under `HERDR_ENV=1` and is not inside tmux.
 A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
@@ -136,7 +141,8 @@ A claimed parent identity that cannot be resolved exactly stops the spawn before
 That covers:
 
 - A missing or unusable socket identity.
-- A closed or unreadable launcher pane.
+- A launcher pane that cannot be read, including a destroyed pane, which Herdr answers with `pane_not_found`. The refusal says it could not be read.
+- A launcher pane id that Herdr resolves to a different pane (such as a legacy id form), or a pane record with no tab or workspace. The refusal calls the pane id stale and names `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` as the variables to refresh in the shell.
 - A pane and tab that disagree about their workspace.
 - A workspace missing from the session.
 - A pane belonging to another named session or Herdr server.
@@ -292,6 +298,8 @@ Protocol 16 exposes `workspace.move` over the named session socket but no CLI su
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
+If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -369,9 +377,16 @@ If the task is later dispatched fresh, no space still holds its recorded checkou
 
 ### Restart recovery
 
+A fresh task leases its task copy durably with `treehouse get --lease` and then moves the pane's top-level shell into it.
+Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd` field does not follow the nested shell an interactive `treehouse get` opens, so a restart would otherwise reopen the worker in the primary clone.
+The lease outlives the pane: teardown closes the exact pane before it returns the lease, because returning the copy ends the pane's top-level shell and Herdr would then remove the pane outside the focus-preserving close.
+An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
+
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another grouped create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
+That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
+A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
 A grouped worker is never reclaimed in place, because its space belongs to exactly one worktree and a fresh dispatch acquires a fresh one.
 Only a retired same-identity version 2 binding may replace one exact agent-free restart husk in place.
@@ -465,8 +480,14 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 - Grouping is best-effort; a grouped worker is never reclaimed in place after a Herdr restart, and only an exact same-identity retired version 2 binding survives one in place.
 - A failed journal publication, a contended lock, or a failed Herdr grouping call leaves that worker in its launching space rather than stopping the spawn; only an unidentifiable moved terminal stops it.
-- Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended, rather than falling back flat.
+- Recovery of an existing presentation journal refuses by default when the shared presentation lock is contended, rather than falling back flat.
   Default-on makes that refusal reachable in any Herdr home.
+  Pass `fm-spawn.sh --herdr-resume-lock-wait` to opt that recovery into waiting for the lock instead, so concurrent recoveries can serialize.
+  The flag applies to a fresh ship or scout spawn that recovers a journal.
+  The multi-task path forwards the flag to each per-pair spawn.
+  `fm-spawn.sh --relaunch` and `--secondmate` take no exact-resume presentation-order lock, so the flag has no effect there.
+  Dead-owner reclaim still stops the wait when a holder crashed.
+  Unbounded blocking on the session lock is never the default.
 - A worker launched from a space that sits at its own project's main checkout, such as Firstmate working on its own repository, stays in that space.
 - Closing a project row ends every worker grouped under it; Firstmate reports the loss but cannot prevent it, and cannot yet relaunch those workers in place.
 - A project's parent space persists after its last worker leaves; close it in Herdr once it is no longer wanted.
@@ -493,6 +514,124 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence for the focus-flash test.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#attached-foreground-viewer) owns the active versioned evidence and the re-run trigger for the attached-viewer test.
+
+## Project groups
+
+Project groups are an opt-in display layer that shows each task's project group and status in Herdr's sidebar and sorts Herdr's agents list by group and then by status.
+They are off by default, and without the setting nothing in this page's other sections changes.
+They are display-only: no tag or view is task, endpoint, ownership, or cleanup authority.
+
+### Turning project groups on
+
+The local gitignored `config/herdr-project-groups` file controls them.
+It is inherited into secondmate homes, because the agents view is one per Herdr server and every home's tasks share it.
+
+| File content | Result |
+| --- | --- |
+| Absent | Off. No producer runs and no Herdr call is made. |
+| `off` | Off, the same as absent. |
+| `on`, or empty | On, with one group per project, named after the task's project directory. |
+| Rule lines | On, with the groups and group order the rules define. |
+
+Blank lines and lines starting with `#` are ignored.
+
+### Group rules
+
+Each rule line is a group name followed by selectors, separated by whitespace.
+The order in which a group name first appears is that group's display order, and a group may span several lines.
+Group names use letters, digits, `.`, `_`, `+`, and `-`, at most 32 characters.
+
+| Selector | Matches |
+| --- | --- |
+| `task:<prefix>` | A task id equal to `<prefix>` or starting with `<prefix>-`. |
+| `repo:<name>` | A task whose project directory is named `<name>`. |
+| `*` | Every task. |
+
+Task-id selectors win over repository selectors, which win over `*`, across all lines; within one selector kind the first matching line wins.
+A task that no rule matches is grouped by its project directory and listed after every rule group.
+An invalid group name or an unknown selector is ignored with a warning.
+
+Example, grouping by area of work and keeping a catch-all last:
+
+```text
+# config/herdr-project-groups
+Web       task:web task:shop repo:storefront
+Backend   task:api repo:api-server
+Ops       task:deploy task:infra
+Other     *
+```
+
+### Tags and status order
+
+For each ship and scout task recorded in the home with Herdr endpoint metadata, Firstmate reports display-only metadata tokens under the source `firstmate`:
+
+| Token | On | Value |
+| --- | --- | --- |
+| `fm_group` | pane and projected workspace | The group name. |
+| `fm_state` | pane and projected workspace | The display status. |
+| `fm_task` | pane | The task id. |
+| `fm_sort` | pane | `<group order>.<group>.<status rank>.<task>`, at most 80 characters. |
+| `fm_group_order` | projected workspace | `<group order>.<group>`. |
+
+Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and pane, whose live workspace holds that single pane.
+A flat-layout task tab shares its workspace with other tasks, so it gets pane tokens only.
+
+The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, in this rank order:
+
+| Rank | `fm_state` | Status log |
+| --- | --- | --- |
+| 1 | `needs-captain` | An open decision, or a captain-held transfer. |
+| 2 | `problem` | `blocked` or `failed`. |
+| 3 | `running` | Anything else, including `working`, `paused`, and no status yet. |
+| 4 | `done` | `done`. |
+
+It is the worker's latest declaration, not the reconciled current state that `bin/fm-crew-state.sh` owns, and it can lag one watcher poll behind the log.
+Herdr's own agent status dot stays live beside it.
+
+The watcher reconciles every task once per poll cycle, and a spawn tags its new task at once.
+A reconcile reads each session's workspace and pane lists once and reports only tokens whose live value differs.
+Whenever it reports a pane token, it also sets the agents view: `agent.view.set` with source `firstmate`, label `projects`, and sort by the `fm_sort` token, then workspace order.
+Herdr keeps neither tokens nor the agents view across a server restart, so the next reconcile after a restart reports them again.
+Agents without an `fm_sort` token, such as Firstmate itself or another tool's agents, sort after the tagged ones.
+Herdr exposes no CLI for the agents view, so `bin/backends/herdr-agent-view.py` sends only those two whitelisted requests over the named session socket.
+
+Tags and the agents view need Herdr protocol 22, verified with Herdr 0.9.5; the wire schema comes from Herdr 0.9.3, which speaks the same protocol.
+An older client warns once per protocol and the feature stays inactive.
+
+`bin/fm-herdr-groups.sh` owns the commands, including `plan` to preview groups and statuses without touching Herdr and `clear` to remove this home's tags and the agents view after turning the feature off.
+
+### Sidebar rows
+
+Herdr shows custom tokens only where its own configuration names them.
+Firstmate never edits Herdr's configuration on its own.
+`bin/fm-herdr-groups.sh sidebar-config` prints these suggested rows, and `sidebar-config --apply <path>` appends them to that Herdr configuration file after copying it to `<path>.bak-<epoch>`, refusing when the file already defines sidebar rows:
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "$fm_group", bold = true }, "$fm_state"],
+]
+
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
+]
+```
+
+Run `herdr server reload-config` afterwards to apply them.
+Colors can be added with Herdr's inline token styles.
+
+### Placement
+
+Project groups place nothing.
+Each worker's space is placed by the per-project grouping under [Presentation spaces](#presentation-spaces), and the tags only label and sort what is already there.
+
+### Verification status
+
+The tags and the agents view are covered by offline tests against a scripted Herdr CLI and socket helper (`tests/fm-herdr-groups.test.sh`).
+They were also exercised against a real Herdr 0.9.5 server (protocol 22) in a guarded lab session: after one watcher poll `herdr pane list` showed the `fm_*` tokens on each task pane, the agents list header read `projects` with tasks ordered by group and then status, and `fm-herdr-groups.sh clear` removed the tokens and the view.
+To repeat the check on a live session, turn the feature on, wait one watcher poll, and confirm the same three results.
 
 ## Default-tab prune safety
 
@@ -555,7 +694,9 @@ Typed-plane text is typed once; only Enter is retried.
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
-Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail, while the shared inbox pending-line confirmation read (bin/fm-task-inbox-lib.sh) stays a bounded tail on every backend: an overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer is by definition inside the viewport.
+Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail.
+An overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer is by definition inside the viewport.
+[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns the separate shared inbox pending-line confirmation read.
 Dated measurement: docs/verification/runtime-backends.md "Claude exit behind the slash-command popup".
 
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
@@ -637,6 +778,7 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - Bare agent-glyph rows, including muse's `⟩`, which the adapter's retired local pattern silently omitted.
 - opencode's left bar.
 - The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+- Cortex Code's titled rounded top rule, admitted only when native `agent get` identity is exactly `cortex`, which the adapter reads lazily and only when the classifier answers `need-identity` for a titled rounded box holding an agent prompt glyph; the same box on any other pane stays ambiguous, and Cortex is [verified](verification/cortex.md) on Herdr for crewmates and scouts only.
 
 ### Pi composer states
 
@@ -671,6 +813,25 @@ No Herdr-specific copy of that protocol exists.
 
 ## Restart and liveness behavior
 
+### Externally managed servers
+
+By default Firstmate starts a session's Herdr server itself, headless, whenever an operation finds it not running.
+That is wrong when a service manager, such as a systemd user unit, owns the server.
+During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
+
+The owner opts out by writing marker files into the session directory, the directory holding the socket that `herdr --session <name> status --json` reports as `.server.socket`:
+
+| Marker | Written by the owner | Firstmate behavior |
+| --- | --- | --- |
+| `firstmate-server-owner` | Once, for as long as it owns the server; the first line names the owner | Uses a running server; never starts a stopped one, and waits a bounded time for it to report running, then fails naming the owner |
+| `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts or uses a server, even one that reports running; waits a bounded time for the marker to clear and the server to report running, then fails naming the marker |
+
+The wait is up to 60 checks half a second apart, 30 seconds in all.
+A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
+A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
+Every operation checks the session directory for a replacement marker once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
+That check reuses the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
+
 ### Husks after a server restart
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
@@ -685,7 +846,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
@@ -784,8 +945,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 ## Away-mode supervisor support
 
-The away daemon supports tmux and Herdr supervisor panes only.
-It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
+[Away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns supported backends and detection.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
@@ -839,10 +999,11 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ## Active limits
 
 - Project grouping relies on Herdr's worktree commands and is best-effort only, and a project-row close cannot be refused.
+- Project groups need protocol 22 and Python, are tested offline, and were checked live once against Herdr 0.9.5 on protocol 22.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
-- Only tmux and Herdr can host the away-mode supervisor terminal.
+- Supervisor transport support is separate from task-spawn support; see [away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Regression entry points
 
@@ -862,6 +1023,7 @@ tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
