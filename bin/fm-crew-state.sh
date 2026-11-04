@@ -13,6 +13,9 @@
 # A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
 # named head as reachable outside the worker's disposable copy; otherwise blocked.
 #
+# FM_CREW_STATE_RUN_ONLY=1 stops after the run-step read: with no attributed run it
+# reports `state: unknown · source: none` instead of consulting the pane or the log.
+#
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
 # with no heuristics and no LLM.
@@ -545,6 +548,41 @@ nm_gate_name() {
   [ -n "$gate" ] && { printf '%s' "$gate"; return; }
   row=$(nm_gate_step_row)
   [ -n "$row" ] && printf '%s' "${row%%|*}"
+}
+# Whole seconds the run reports it has been waiting on its agent, read from the
+# run's own `awaiting_agent: parked <duration>` line (a Go duration such as 0s,
+# 2m10s or 1h2m3s); empty when the run carries no such line or the duration is
+# not one this reader recognises. The pipeline owns that clock, so it survives a
+# watcher restart and counts time no poller observed.
+nm_awaiting_agent_seconds() {
+  local line v total=0 num unit
+  line=$(printf '%s\n' "$RUN_OUT" | grep -E "$FM_NM_AWAITING_AGENT_RE" | head -1 || true)
+  [ -n "$line" ] || return 0
+  v=$(strip_quotes "$(trim "${line#*:}")")
+  case "$v" in parked\ *) v=${v#parked } ;; *) return 0 ;; esac
+  v=$(trim "$v")
+  [ -n "$v" ] || return 0
+  while [ -n "$v" ]; do
+    num=${v%%[!0-9]*}
+    [ -n "$num" ] || return 0
+    v=${v#"$num"}
+    case "$v" in .*) v=${v#.}; v=${v#"${v%%[!0-9]*}"} ;; esac
+    case "$v" in
+      ms*) unit=ms; v=${v#ms} ;;
+      d*) unit=d; v=${v#d} ;;
+      h*) unit=h; v=${v#h} ;;
+      m*) unit=m; v=${v#m} ;;
+      s*) unit=s; v=${v#s} ;;
+      *) return 0 ;;
+    esac
+    case "$unit" in
+      d) total=$((total + 10#$num * 86400)) ;;
+      h) total=$((total + 10#$num * 3600)) ;;
+      m) total=$((total + 10#$num * 60)) ;;
+      s) total=$((total + 10#$num)) ;;
+    esac
+  done
+  printf '%s' "$total"
 }
 nm_gate_findings_count() {
   local f row rest
@@ -1083,6 +1121,9 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  if [ "$RUN_SOURCE" = full ] && [ -z "$SELECTED_RUN_ID" ]; then
+    SELECTED_RUN_ID=$(strip_quotes "$(nm_field id)")
+  fi
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""
@@ -1152,6 +1193,11 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
+      # How long the run itself says it has waited on its agent, as its own
+      # component for the same whole-component reason as the one below. Absent
+      # when the run reports no awaiting_agent clock.
+      parked_secs=$(nm_awaiting_agent_seconds)
+      [ -z "$parked_secs" ] || RUN_DETAIL="$RUN_DETAIL${SEP}$FM_PARKED_FOR_PREFIX${parked_secs}s"
       # Its own ${SEP} component, not free text inside the detail: consumers
       # compare a whole component for equality, so nothing a gate name or a
       # later note happens to contain can mint it.
@@ -1278,6 +1324,10 @@ fi
 # both classifier-backed backends (tmux and herdr) - and every death-class
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
+# FM_CREW_STATE_RUN_ONLY=1 asks only whether a run is attributed: bin/fm-watch.sh's
+# per-poll parked-run tick reads this verdict for every ship task, and the pane
+# reads below are the costly, endpoint-dependent half it has no use for.
+[ "${FM_CREW_STATE_RUN_ONLY:-}" != 1 ] || emit unknown none "no run attributed (run-only read)"
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
