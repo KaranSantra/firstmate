@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, Gerrit
-# change, or CodeCommit pull request poll sidecar.
+# change, Forgejo pull request, or CodeCommit pull request poll sidecar.
 # It emits exactly one merged line for a merged change and stays silent
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and the AWS CLI for CodeCommit, so an upstream
-# checkout needs no extra tooling to follow the first two. The Gerrit and
-# CodeCommit branches additionally need jq, which bin/fm-pr-check.sh refuses to
-# arm either watch without.
+# GitLab, gerrit-axi for Gerrit, tea for Forgejo, and the AWS CLI for
+# CodeCommit, so an upstream checkout needs no extra tooling to follow GitHub or
+# GitLab. The Gerrit, Forgejo, and CodeCommit branches additionally need jq,
+# which bin/fm-pr-check.sh refuses to arm those watches without.
 #
 # CodeCommit needs one datum the URL cannot carry, the local AWS profile that
 # selects its account's credentials. It arrives as a sixth validated field and
@@ -245,6 +245,66 @@ case "$provider" in
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
     [ "$status" = MERGED ] && printf '%s\n' merged
+    ;;
+  forgejo)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    case "$path" in
+      */*/*|/*|*/) exit 0 ;;
+    esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ "$owner" != "$path" ] || exit 0
+    for segment in "$owner" "$repo"; do
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || exit 0
+      case "$segment" in
+        .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+      esac
+    done
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    command -v tea >/dev/null 2>&1 || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    # tea addresses a repo by slug only; the host comes from a named login
+    # rather than a URL the way gh and glab take one, so the login registered
+    # for this exact host is resolved fresh on every poll rather than trusted
+    # from anywhere durable. Refuse to guess when zero or more than one
+    # registered login matches, rather than picking one arbitrarily.
+    # The list is parsed as JSON, never split on quotes per line, so a login
+    # printed as one compact object still matches; this is the same filter
+    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
+    login=$(
+      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+        if type == "array" then
+          [ .[]
+            | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
+                     and (.url | type) == "string")
+            | select((.url
+                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                      | sub("[/?#].*$"; "")
+                      | sub("^.*@"; "")
+                      | sub(":[0-9]+$"; "")) == $h)
+            | .name ]
+          | if length == 1 then .[0] else error("not exactly one matching login") end
+        else
+          error("login list is not an array")
+        end' 2>/dev/null
+    ) || exit 0
+    [ -n "$login" ] || exit 0
+    # tea's single-PR view ignores field selection, so the one pull request
+    # is read by number from the REST record through "tea api", which keeps
+    # the credential inside tea. "tea api" exits 0 on an HTTP error with the
+    # error body as output, so only a boolean merged field of true wakes this
+    # poll and every other reading stays silent.
+    merged=$(tea api --login "$login" --repo "$owner/$repo" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
+        if type == "object" and (.merged | type) == "boolean"
+        then .merged | tostring
+        else error("invalid pull request record")
+        end' 2>/dev/null) || exit 0
+    [ "$merged" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

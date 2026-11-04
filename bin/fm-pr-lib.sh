@@ -4,12 +4,12 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, an
+# "path" is the full project path, which is owner/repository on GitHub and
+# Forgejo, an arbitrarily nested group/subgroup/project namespace on GitLab, an
 # arbitrarily nested project name on Gerrit, where "number" is the change
 # number, and the bare repository name on CodeCommit. A GitLab or Gerrit project
 # can sit at any depth, so no owner/repository pair can address one and the
-# sidecar carries the whole path instead. GitLab and Gerrit also run on
+# sidecar carries the whole path instead. GitLab, Gerrit, and Forgejo all run on
 # self-hosted instances, Gerrit runs nowhere else, and a CodeCommit console host
 # names its own region, so the host is part of that identity rather than a
 # constant. Every consumer re-derives the identity from the stored URL and
@@ -19,11 +19,11 @@
 # that selects the credentials for its account. It is a credential selector and
 # not identity, so it is kept out of the five identity fields and appended to
 # the sidecar as an optional sixth line that only a codecommit record may
-# carry. A GitHub or GitLab sidecar is byte-identical to one written before
-# CodeCommit existed. The registration already hashes the whole sidecar, so
-# that sixth line is bound against tampering by the same data hash that binds
-# the identity, and a swapped profile cannot point a poll at a same-named
-# repository in another AWS account without failing that hash.
+# carry. A GitHub, GitLab, Gerrit, or Forgejo sidecar is byte-identical to one
+# written before CodeCommit existed. The registration already hashes the whole
+# sidecar, so that sixth line is bound against tampering by the same data hash
+# that binds the identity, and a swapped profile cannot point a poll at a
+# same-named repository in another AWS account without failing that hash.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -131,7 +131,7 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
+# GitLab, Gerrit, and Forgejo all serve self-hosted instances, so the host is part of the
 # identity rather than a constant. It is accepted only as a lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
 # change. github.com is refused here even though its shape is otherwise valid:
@@ -280,17 +280,29 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
+# exactly owner/repository, so each segment is validated the same way GitHub's
+# owner and repo are, minus GitHub's specific hyphen-run and length rules.
+fm_pr_forgejo_segment_valid() {
+  local segment=${1-}
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || return 1
+  case "$segment" in
+    .|..|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical pull request, merge request, Gerrit change, or CodeCommit
 # pull request URL into the provider-tagged identity. Validation is strict and
-# per provider: the GitHub username and repository rules are unchanged, GitLab
-# and Gerrit each get their own namespace rules rather than a loosened GitHub
-# rule, and CodeCommit gets its own region and repository rules.
+# per provider: the GitHub username and repository rules are unchanged, GitLab,
+# Gerrit, and Forgejo each get their own namespace rules rather than a loosened
+# GitHub rule, and CodeCommit gets its own region and repository rules.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab, gerrit, or
-# codecommit URL leaves them empty, and those paths address the project by
-# FM_PR_HOST and FM_PR_PATH instead, so a change on any instance resolves
-# without a hardcoded host.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
+# because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab,
+# gerrit, or codecommit URL leaves them empty, and those paths address the
+# project by FM_PR_HOST and FM_PR_PATH instead, so a change on any instance
+# resolves without a hardcoded host.
 # FM_PR_REGION is additionally set for codecommit, read back out of the console
 # host, because the AWS CLI takes the region as its own argument.
 #
@@ -349,23 +361,43 @@ fm_pr_url_parse() {
   # nested path for the same reason GitLab's does, so it is never flattened into
   # an owner/repository pair that cannot address it.
   pattern='^https://([a-z0-9.-]{1,253})/c/([A-Za-z0-9._/-]+)/\+/([1-9][0-9]*)$'
-  if ! [[ "$raw" =~ $pattern ]]; then
-    fm_pr_codecommit_url_parse "$raw"
-    return
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_gerrit_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gerrit
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
   fi
-  host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
-  fm_pr_forge_host_valid "$host" || return 1
-  fm_pr_gerrit_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gerrit
-  FM_PR_URL=$raw
-  FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
-  return 0
+  # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
+  # route separator and no "/+/" change separator, so this shape never collides
+  # with the GitLab or Gerrit patterns above.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
+    fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+    FM_PR_PROVIDER=forgejo
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[2]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
+    return 0
+  fi
+  fm_pr_codecommit_url_parse "$raw"
 }
 
-# Parse a CodeCommit console pull request URL. Kept apart from the two forge
+# Parse a CodeCommit console pull request URL. Kept apart from the forge
 # patterns above so its region agreement check reads as one rule.
 #
 # The console reaches one pull request by several spellings, so this parser
@@ -1240,6 +1272,98 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+}
+
+# tea addresses a repo by slug only and takes the host from a named login, so
+# the one login registered for <host> is printed by name, and zero or several
+# matches fail rather than pick one. The list is parsed as JSON with jq rather
+# than split on quotes per line, because tea's JSON is not guaranteed to put
+# each field on its own line: a login printed as one compact object would hand
+# a line-oriented split the name where it expects the url, and arming would
+# then refuse every host. A login matches when its url's host - scheme,
+# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
+# its own copy of this filter because the watcher body sources nothing.
+# shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
+FM_PR_FORGEJO_LOGIN_JQ='
+  if type == "array" then
+    [ .[]
+      | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
+               and (.url | type) == "string")
+      | select((.url
+                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                | sub("[/?#].*$"; "")
+                | sub("^.*@"; "")
+                | sub(":[0-9]+$"; "")) == $h)
+      | .name ]
+    | if length == 1 then .[0] else error("not exactly one matching login") end
+  else
+    error("login list is not an array")
+  end'
+fm_pr_forgejo_login() {  # <host>
+  command -v tea >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
+}
+
+# The state, merged flag, and head commit of one Forgejo pull request, read
+# from the REST record through "tea api" so the credential never leaves tea.
+# "tea api" exits 0 on an HTTP error and prints the error body instead, so
+# only a record whose state, merged, and head.sha fields all have the expected
+# types is accepted; anything else returns 1 for an honest unknown.
+fm_pr_forgejo_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 login json fields line
+  local total=0 named=0 state='' merged='' head=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  login=$(fm_pr_forgejo_login "$host") || return 1
+  [ -n "$login" ] || return 1
+  if ! json=$(tea api --login "$login" --repo "$path" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type) == "string" and .state != ""
+        and (.merged | type) == "boolean" and (.head.sha | type) == "string"
+      then
+        "state=" + .state,
+        "merged=" + (.merged | tostring),
+        "head=" + .head.sha
+      else
+        error("invalid pull request record")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
 }
 
 # gerrit-axi resolves its server from the current directory's origin remote
