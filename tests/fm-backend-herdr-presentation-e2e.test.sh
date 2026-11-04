@@ -129,7 +129,19 @@ case "${1:-} ${2:-}" in
 esac
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+if [ -n "$abort_pane_probe" ]; then
+  probe_err=$(mktemp "$TMP_ROOT/abort-pane-get.XXXXXX")
+  if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2> "$probe_err"); then
+    status=0
+  else
+    status=$?
+  fi
+  if printf '%s\n%s' "$out" "$(cat "$probe_err")" | jq -e 'select(.error.code? == "pane_not_found")' >/dev/null 2>&1; then
+    printf 'pane-gone\t-\t-\t%s\n' "$abort_pane_probe" >> "$FOCUS_AUDIT_LOG"
+  fi
+  cat "$probe_err" >&2
+  rm -f "$probe_err"
+elif out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
