@@ -25,6 +25,9 @@
 # exists to override, so falling back to it would arm a watch that can only
 # fail. The profile is stored in the same private sidecar as the identity and
 # is never interpolated into shell source.
+#
+# The recorded pr= also frees the task's place in a declared project capacity
+# (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 

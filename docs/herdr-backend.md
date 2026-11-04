@@ -372,6 +372,8 @@ If the task is later dispatched fresh, no space still holds its recorded checkou
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another grouped create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
+That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
+A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
 A grouped worker is never reclaimed in place, because its space belongs to exactly one worktree and a fresh dispatch acquires a fresh one.
 Only a retired same-identity version 2 binding may replace one exact agent-free restart husk in place.
@@ -465,8 +467,14 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 - Grouping is best-effort; a grouped worker is never reclaimed in place after a Herdr restart, and only an exact same-identity retired version 2 binding survives one in place.
 - A failed journal publication, a contended lock, or a failed Herdr grouping call leaves that worker in its launching space rather than stopping the spawn; only an unidentifiable moved terminal stops it.
-- Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended, rather than falling back flat.
+- Recovery of an existing presentation journal refuses by default when the shared presentation lock is contended, rather than falling back flat.
   Default-on makes that refusal reachable in any Herdr home.
+  Pass `fm-spawn.sh --herdr-resume-lock-wait` to opt that recovery into waiting for the lock instead, so concurrent recoveries can serialize.
+  The flag applies to a fresh ship or scout spawn that recovers a journal.
+  The multi-task path forwards the flag to each per-pair spawn.
+  `fm-spawn.sh --relaunch` and `--secondmate` take no exact-resume presentation-order lock, so the flag has no effect there.
+  Dead-owner reclaim still stops the wait when a holder crashed.
+  Unbounded blocking on the session lock is never the default.
 - A worker launched from a space that sits at its own project's main checkout, such as Firstmate working on its own repository, stays in that space.
 - Closing a project row ends every worker grouped under it; Firstmate reports the loss but cannot prevent it, and cannot yet relaunch those workers in place.
 - A project's parent space persists after its last worker leaves; close it in Herdr once it is no longer wanted.

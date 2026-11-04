@@ -10,6 +10,8 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -220,13 +222,18 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+LOCK_REFUSE_HOLDER_PID=
+LOCK_WAIT_HOLDER_PID=
 cleanup_all() {
-  local wt
-  if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
-    kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
-    wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
-    LOCK_CONTENTION_OWNER_PID=
-  fi
+  local wt pid
+  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  LOCK_CONTENTION_OWNER_PID=
+  LOCK_REFUSE_HOLDER_PID=
+  LOCK_WAIT_HOLDER_PID=
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
@@ -360,10 +367,14 @@ Verify project-grouped workspace behavior for $id.
 EOF
 }
 
-spawn_task() {  # <id> <home> <project>
+spawn_task() {  # <id> <home> <project> [extra fm-spawn args...]; SPAWN_DEADLINE_SECONDS bounds the run
   local id=$1 home=$2 project=$3
+  shift 3
+  local -a deadline_cmd=()
+  [ -z "${SPAWN_DEADLINE_SECONDS:-}" ] || deadline_cmd=(fm_run_timed "$SPAWN_DEADLINE_SECONDS")
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --mode no-mistakes --yolo off --backend herdr
+    ${deadline_cmd[@]+"${deadline_cmd[@]}"} "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" \
+    --mode no-mistakes --yolo off --backend herdr "$@"
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr> <project>
