@@ -2471,6 +2471,35 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+test_composer_deferral_names_pending_text_or_unrecognized_shape() {
+  # A deferral must say WHICH refusal it was: real unsubmitted text is a
+  # human's draft, while an unproven composer points at the classifier, the
+  # pane, a dead shell, or a busy harness - the case a titled claude rule once
+  # hid for hours.
+  local dir state fakebin sent log
+  dir=$(make_bordered_case composer-deferral-reason)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a pending composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=pending: unsubmitted text in the composer)' "$log" >/dev/null \
+    || fail "a pending composer deferral does not name the unsubmitted text: $(cat "$log")"
+  : > "$log"
+  printf 'build output\nplain transcript line\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a screen with no recognized composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=unknown: composer not proven empty or pending (unrecognized screen, or harness not idle))' "$log" >/dev/null \
+    || fail "an unrecognized screen deferral does not say the composer was not proven empty or pending: $(cat "$log")"
+  [ ! -s "$sent" ] || fail "a deferred inject typed text"
+  pass "a composer deferral names pending text apart from an unproven composer"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -2793,6 +2822,27 @@ test_wedge_alarm_herdr_channel_selected() {
   grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
   grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+test_wedge_alarm_rex_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-rex); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=rex FM_SUPERVISOR_BACKEND=rex \
+    wedge_alarm_notify "away-mode escalations WEDGED 700s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'rex' "$log" >/dev/null || fail "rex channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 700s undelivered' "$log" >/dev/null || fail "rex channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "rex-only config also selected osascript"
+  pass "rex channel routes through the notifier seam with the summary (never a real pane write)"
+}
+
+test_wedge_alarm_auto_never_selects_rex() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-rex); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    FM_SUPERVISOR_BACKEND=rex wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "auto on Darwin did not select osascript: $(cat "$log")"
+  grep -E '^rex' "$log" >/dev/null && fail "auto selected the opt-in rex channel on a Rex supervisor: $(cat "$log")"
+  pass "auto never adds the opt-in rex channel, even on a Rex supervisor pane"
 }
 
 test_wedge_alarm_command_channel_receives_summary() {
@@ -3386,6 +3436,7 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_composer_deferral_names_pending_text_or_unrecognized_shape
 test_normal_flush_clears_stale_wedge_marker
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events
@@ -3400,6 +3451,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_rex_channel_selected
+test_wedge_alarm_auto_never_selects_rex
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive

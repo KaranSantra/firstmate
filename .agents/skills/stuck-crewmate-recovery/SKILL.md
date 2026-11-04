@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -19,6 +19,12 @@ That plane covers workers running in this home; a remotely placed secondmate is 
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 
+## Managed approval failover
+
+After observing a Codex command-approval prompt under bypass or a Claude policy refusal of a bypass session, ask the captain for explicit approval to change the owning home's worker permission posture and relaunch the worker.
+Only after that explicit word, load `harness-adapters` and use `FM_HOME=<owning-home> bin/fm-approval-failover.sh apply <id>`; its header owns persistent configuration and guarded recovery, with no automatic detection.
+Report the saved model-reviewed remedy and actual recovery result, preserving explicit settings and work rather than changing vendor policy or answering approval or hook-trust prompts.
+
 ## Session-start reconciliation for a dead ordinary direct report
 
 This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
@@ -32,7 +38,7 @@ Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
-Use `treehouse status` for treehouse-backed tmux, herdr, zellij, cmux, or Paseo tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+Use `treehouse status` for treehouse-backed tmux, herdr, zellij, cmux, Paseo, or Rex tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.

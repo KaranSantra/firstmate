@@ -387,6 +387,15 @@ finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr> <project>
     || fail "grouped spawn $id retry failed after task-set publication completed: $(cat "$err")"
 }
 
+finish_concurrent_recovery() {  # <id> <home> <status> <stdout> <stderr>
+  local id=$1 home=$2 status=$3 out=$4 err=$5
+  [ "$status" -ne 0 ] || return 0
+  grep -F "presentation recovery could not acquire its session lock" "$err" >/dev/null 2>&1 \
+    || fail "concurrent recovery $id failed unexpectedly: $(cat "$err")"
+  spawn_task "$id" "$home" "$RECOVERY_PROJECT_DIR" > "$out" 2> "$err" \
+    || fail "concurrent recovery $id retry failed after session-lock contention cleared: $(cat "$err")"
+}
+
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \

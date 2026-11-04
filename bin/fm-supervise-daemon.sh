@@ -81,17 +81,20 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
-#                                   tmux target or a herdr "<session>:<pane-id>"
-#                                   target; which one it's read as is decided by
-#                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
+#                                   $HERDR_PANE_ID under herdr,
+#                                   "<session-uuid>:<block-uuid>" from
+#                                   $REX_SESSION/$REX_BLOCK under rex - then
+#                                   firstmate:0 fallback). Accepts a tmux,
+#                                   herdr, or rex target; which one it's read as
+#                                   is decided by FM_SUPERVISOR_BACKEND (below),
+#                                   independently.
+#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr|rex;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
 #                                   executing inside - $TMUX_PANE selects tmux,
-#                                   $HERDR_ENV=1 selects herdr - falling back to
+#                                   $HERDR_ENV=1 selects herdr, TERM_PROGRAM=rex
+#                                   selects rex - falling back to
 #                                   tmux). zellij, orca, cmux, and paseo are not
 #                                   yet supported as supervisor backends; the
 #                                   daemon refuses loudly at startup rather than
@@ -126,7 +129,7 @@
 #                                   alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
-#                                   (off|auto|osascript|herdr|command:<cmd>). An
+#                                   (off|auto|osascript|herdr|rex|command:<cmd>). An
 #                                   absent file/var means auto: on macOS that is
 #                                   an OS-level notification, so the alarm is
 #                                   never silent. See wedge_alarm_notify below
@@ -204,14 +207,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
-# Supervisor backends this daemon knows how to inject into today. zellij, orca,
-# and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
+# Supervisor backends this daemon knows how to inject into today. rex goes
+# through the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij,
+# orca, cmux, and paseo are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
 # daemon has no verified composer/busy primitives wired up for them yet - see
 # docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr rex"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -586,11 +590,21 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
+  # This list mirrors the watcher's own per-window markers, cap markers included:
+  # releasing a window's wedge timer and escalation count releases them with it,
+  # which is what bin/fm-watch.sh's wedge_episode_end does on the routes that
+  # end an episode there. A marker missing from either list outlives a release
+  # the other already made, and a cap marker that does outlives its window for
+  # the whole horizon.
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key" "$state/.subsuper-stale-$key" \
     "$state/.subsuper-dialog-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
+    "$state/.wedge-permanent-$watcher_key" \
+    "$state/.wedge-terminal-queued-$watcher_key" \
+    "$state/.wedge-rollback-failed-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
+    "$state/.validating-since-$watcher_key" "$state/.validating-resurfaced-$watcher_key" \
     "$state/.waiting-resurfaced-$watcher_key" "$state/.guard-deferrals-$watcher_key"
 }
 
@@ -1069,6 +1083,42 @@ wedge_alarm_via_herdr() {  # <summary>
   return 1
 }
 
+# Raise Firstmate's own Rex alert on the supervisor pane: a blocked program-status
+# record (id=fm-wedge) plus an OSC 777 desktop notification, which badges that tab
+# and returns the captain to the pane (bin/backends/rex.sh fm_backend_rex_alert).
+# Used only when config/wedge-alarm names `rex`; `auto` never adds it. Needs the
+# supervisor backend to be rex. Best-effort: logs and returns 1 on failure.
+WEDGE_ALARM_REX_RAISED=0
+wedge_alarm_via_rex() {  # <summary>
+  local summary=$1 rc backend target
+  wedge_alarm_os_notifier_override rex "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  [ "$backend" = rex ] || {
+    log "wedge alarm: rex channel needs a Rex supervisor pane (supervisor backend is ${backend:-unset})"; return 1; }
+  fm_backend_source rex >/dev/null 2>&1 || {
+    log "wedge alarm: the rex adapter could not be loaded"; return 1; }
+  if wedge_alarm_run_bounded rex fm_backend_rex_alert "$target" "firstmate: away-mode escalations WEDGED" "$summary" >/dev/null 2>&1; then
+    WEDGE_ALARM_REX_RAISED=1
+    return 0
+  fi
+  log "wedge alarm: rex alert could not be written to the supervisor pane"
+  return 1
+}
+
+# Remove a raised Rex alert once a digest is delivered. Best-effort.
+wedge_alarm_rex_clear() {
+  [ "$WEDGE_ALARM_REX_RAISED" = 1 ] || return 0
+  WEDGE_ALARM_REX_RAISED=0
+  fm_backend_source rex >/dev/null 2>&1 || return 0
+  fm_backend_rex_alert_clear "${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}" >/dev/null 2>&1 || true
+}
+
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
@@ -1102,6 +1152,7 @@ wedge_alarm_emit() {  # <channel> <summary>
   case "$channel" in
     osascript) wedge_alarm_via_osascript "$summary" ;;
     herdr) wedge_alarm_via_herdr "$summary" ;;
+    rex) wedge_alarm_via_rex "$summary" ;;
     command) wedge_alarm_via_command "$cmd" "$summary" ;;
   esac
 }
@@ -1125,7 +1176,7 @@ wedge_alarm_notify() {  # <summary> <marker>
     case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
     case "$ch" in
       '') log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)" ;;
-      osascript|herdr) wedge_alarm_emit "$ch" "$summary" || true ;;
+      osascript|herdr|rex) wedge_alarm_emit "$ch" "$summary" || true ;;
       command:*) wedge_alarm_emit command "$summary" "${ch#command:}" || true ;;
       *) log "wedge alarm: unrecognized active-alert channel directive (redacted); marker still written" ;;
     esac
@@ -1446,7 +1497,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
+  local msg=$1 state target backend retries sleep_s verdict composer reason encoded bytes errf err='' body
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1480,14 +1531,22 @@ inject_msg() {  # <message> [state]
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
   #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
+  #      prior injection) and 'unknown' when it could not prove the composer
+  #      empty or pending: a bare dead-shell prompt (the agent exited to its
+  #      login shell), an unreadable pane, a harness screen the classifier
+  #      does not know, or a recognized composer whose harness is not idle.
+  #      Neither is a safe target - typing the escalation into a
+  #      shell could execute it - so defer on anything that is not
+  #      affirmatively 'empty', and name which of the two it was so a wedge
+  #      that never clears points at the right owner. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    case "$composer" in
+      pending|pending-unproven) reason='unsubmitted text in the composer' ;;
+      *) reason='composer not proven empty or pending (unrecognized screen, or harness not idle)' ;;
+    esac
+    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: $reason)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
@@ -1524,6 +1583,7 @@ inject_msg() {  # <message> [state]
     rm -f "$errf"
   fi
   if [ "$verdict" = empty ]; then
+    wedge_alarm_rex_clear  # A delivered digest ends a raised Rex wedge alarm.
     return 0  # Backend confirmed the submit.
   fi
   err=$(_collapse_newlines "$err")
@@ -1844,7 +1904,7 @@ fm_super_main() {
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
+  # (herdr) > TERM_PROGRAM=rex (rex) > tmux fallback. Resolved before the target below, since target
   # discovery composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
@@ -1857,6 +1917,8 @@ fm_super_main() {
       backend_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"
+    elif fm_supervisor_in_rex; then
+      backend_source="TERM_PROGRAM"
     else
       backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
     fi
@@ -1872,7 +1934,7 @@ fm_super_main() {
   # task calls for, instead of a confusing "does not resolve to a tmux pane"
   # error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
@@ -1882,8 +1944,9 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") >
+  # $REX_SESSION/$REX_BLOCK (rex, composed into "<session-uuid>:<block-uuid>") >
+  # firstmate:0 fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
   # (which reads that env var) use the discovered pane without an extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
@@ -1892,6 +1955,8 @@ fm_super_main() {
       target_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
+    elif fm_supervisor_in_rex; then
+      target_source="TERM_PROGRAM(REX_BLOCK)"
     else
       target_source="FALLBACK(firstmate:0)"
     fi
@@ -1899,7 +1964,7 @@ fm_super_main() {
   if discovered=$(discover_supervisor_target); then
     : # resolved cleanly
   else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, HERDR_ENV/HERDR_PANE_ID, or Rex block); falling back to '$discovered' - verify this is firstmate's pane" >&2
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
