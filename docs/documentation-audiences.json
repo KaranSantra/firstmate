@@ -426,6 +426,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/pstack-review.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/gerrit-forge-integration.md",
       "audience": "maintainer-architecture"
     },
